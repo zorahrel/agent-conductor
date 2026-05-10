@@ -1,0 +1,77 @@
+{
+  "name": "agent-conductor",
+  "version": "0.1.0",
+  "description": "Toolkit to observe, suggest next-step, and inject commands across N concurrent AI coding agent CLI sessions (Claude Code today; pluggable provider model for Aider / Cursor CLI / others). Includes JSONL transcript reader, deterministic status deriver, cwd-collision lock, tmux send-keys controller with audit log, and macOS Reminders bridge as intent layer.",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./jsonl": {
+      "types": "./dist/jsonl/index.d.ts",
+      "import": "./dist/jsonl/index.js",
+      "require": "./dist/jsonl/index.cjs"
+    },
+    "./sessions": {
+      "types": "./dist/sessions/index.d.ts",
+      "import": "./dist/sessions/index.js",
+      "require": "./dist/sessions/index.cjs"
+    },
+    "./tmux": {
+      "types": "./dist/tmux/index.d.ts",
+      "import": "./dist/tmux/index.js",
+      "require": "./dist/tmux/index.cjs"
+    },
+    "./reminders": {
+      "types": "./dist/reminders/index.d.ts",
+      "import": "./dist/reminders/index.js",
+      "require": "./dist/reminders/index.cjs"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test 'src/**/*.spec.ts'",
+    "test:once": "tsx --test 'src/**/*.spec.ts' --test-reporter spec",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "claude-code",
+    "ai-agent",
+    "cli-orchestration",
+    "tmux",
+    "session-management",
+    "transcript-parser",
+    "apple-reminders"
+  ],
+  "author": "Attilio Cianci <hi@armonia.io>",
+  "license": "UNLICENSED",
+  "private": true,
+  "engines": {
+    "node": ">=20"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.5",
+    "tsup": "^8.3.6",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  },
+  "publishConfig": {
+    "access": "restricted"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/zorahrel/agent-conductor.git"
+  }
+}
