@@ -6,10 +6,11 @@
   **Pilot N concurrent AI coding agent CLI sessions from one place.**
 
   <p>
-    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.3.0-6366f1?style=flat-square" alt="version"/></a>
+    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.4.0-6366f1?style=flat-square" alt="version"/></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="license"/></a>
     <a href="https://github.com/zorahrel/agent-conductor/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zorahrel/agent-conductor/ci.yml?branch=main&label=ci&style=flat-square" alt="ci"/></a>
-    <img src="https://img.shields.io/badge/tests-101%20green-22c55e?style=flat-square" alt="tests"/>
+    <img src="https://img.shields.io/badge/tests-109%20green-22c55e?style=flat-square" alt="tests"/>
+    <img src="https://img.shields.io/badge/multi--provider-yes-a78bfa?style=flat-square" alt="multi-provider"/>
     <img src="https://img.shields.io/badge/node-%E2%89%A520-3b82f6?style=flat-square" alt="node"/>
     <img src="https://img.shields.io/badge/typescript-strict-3178c6?style=flat-square" alt="ts"/>
     <img src="https://img.shields.io/badge/runtime%20deps-0-22c55e?style=flat-square" alt="zero-deps"/>
@@ -31,13 +32,52 @@ When you're running 3+ Claude Code (or other AI coding agent) CLI sessions in pa
 - **tmux inject control** — maps `pid → pane` via parent-walk, sends keystrokes via `tmux send-keys`, and writes an append-only audit log (JSONL with 10 MB rotation)
 - **macOS Reminders bridge** — treats Apple Reminders as the intent layer. New todos sync to iPhone / Watch / Siri; check them off anywhere, the polling diff loop emits `todo:added` / `todo:completed` / `todo:updated`
 
-## Why a separate library
+## Multi-provider by default
 
-The logic isn't tied to any specific orchestrator. It started as Phase 2 of an internal multi-channel router project, but the data flow is universal: any consumer that wants to monitor and pilot multiple agent CLI processes on the same machine needs exactly these primitives. Extracting them into a library means:
+Every agent CLI stores its sessions differently — Claude Code uses JSONL under `~/.claude/projects/`, Aider writes markdown, Cursor's CLI has its own format. Rather than hardcode "this is for Claude Code", `agent-conductor` ships with an `AgentProvider` interface and a registry of providers. Claude Code is the default; switching provider is one flag away.
+
+```bash
+agent-conductor providers list
+# NAME        │ DISPLAY     │ DEFAULT │ DESCRIPTION
+# ────────────┼─────────────┼─────────┼─────────────────────────────────────────
+# claude-code │ Claude Code │ ★       │ Anthropic's Claude Code CLI…
+# aider       │ Aider       │         │ AI pair-programming CLI…
+# cursor-cli  │ Cursor CLI  │         │ Anysphere's Cursor CLI…
+```
+
+Current support matrix (v0.4):
+
+| Provider | Discovery | Transcript | Status | Suggest | Inject |
+|---|---|---|---|---|---|
+| `claude-code` ★ | ✅ | ✅ | ✅ | ✅ | ✅ (tmux) |
+| `aider` | ✅ | ⏳ v0.5 | ⏳ v0.5 | stub | ✅ (tmux) |
+| `cursor-cli` | ✅ | ⏳ v0.5 | ⏳ v0.5 | stub | ✅ (tmux) |
+
+Implement your own:
+
+```typescript
+import { registerProvider, type AgentProvider } from "agent-conductor";
+
+const myProvider: AgentProvider = {
+  name: "my-coding-agent",
+  displayName: "MyAgent",
+  description: "…",
+  async discover() { /* find live sessions */ },
+  async readTranscript(session, limit) { /* parse your transcript format */ },
+  async deriveStatus(session) { /* awaiting_user_input / tool_pending / … */ },
+  suggestNext(session, lastSummary, status) { /* deterministic next-step */ },
+  async inject(session, text) { /* tmux send-keys, HTTP POST, …  */ },
+};
+
+registerProvider(myProvider);
+// Now usable: agent-conductor snapshot --provider my-coding-agent
+```
+
+The data flow is universal: any consumer that wants to monitor and pilot multiple agent CLI processes on the same machine benefits from these primitives. Extracting them as a library means:
 
 - Single source of truth — fix a bug once, benefit everywhere
-- Pluggable provider model — v0.1 is Claude Code only; v0.2 adds Aider, Cursor CLI, ChatGPT CLI adapters
-- Data-source agnostic — `buildSnapshot(sessions)` takes sessions as a parameter; callers bring their own discovery (ps+lsof, registry, fixtures)
+- Data-source agnostic — `buildSnapshot(sessions)` accepts sessions; the provider supplies them
+- Pluggable — v0.4 ships 3 providers; v0.5 plans full Aider + Cursor + ChatGPT CLI
 
 ## Install
 
@@ -55,9 +95,18 @@ After installation, the `agent-conductor` command is available globally (when in
 
 ```bash
 agent-conductor --help                         # show all subcommands
-agent-conductor snapshot                       # pretty table of every live session
+agent-conductor providers list                 # see registered providers
+agent-conductor providers info aider           # details + capabilities
+
+agent-conductor snapshot                       # default: Claude Code
+agent-conductor snapshot --provider aider      # switch provider
+agent-conductor snapshot --all-providers       # merge sessions across all
 agent-conductor snapshot --json                # raw OrchestratorSnapshot JSON
+
 agent-conductor sessions                       # discovery-only (cheaper than snapshot)
+agent-conductor sessions --provider cursor-cli # Cursor CLI sessions only
+agent-conductor sessions --all-providers       # all running AI agents
+
 agent-conductor transcript path/to/file.jsonl --limit 5
 agent-conductor todos list --list AgentTasks
 agent-conductor todos add "Refactor auth" --pid 1234 --repo demo-app --phase plan

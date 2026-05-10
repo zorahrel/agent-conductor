@@ -30,6 +30,7 @@ import { todosCmd } from "./commands/todos.js";
 import { tmuxCmd } from "./commands/tmux.js";
 import { injectCmd } from "./commands/inject.js";
 import { auditCmd } from "./commands/audit.js";
+import { providersCmd } from "./commands/providers.js";
 
 const HELP = `agent-conductor — pilot N concurrent AI coding agent CLI sessions from one place.
 
@@ -37,13 +38,14 @@ Usage:
   agent-conductor <command> [flags]
 
 Commands:
-  snapshot              Build OrchestratorSnapshot for live Claude Code sessions
+  snapshot              Build OrchestratorSnapshot for live AI agent sessions
   sessions              List discovered sessions with refinedStatus
   transcript <path>     Project last-N turns from a JSONL transcript file
   todos <list|add|complete>   Manage Apple Reminders intent layer
   tmux <panes|find>     Inspect tmux pane mapping
   inject                Send keystrokes to a session's tmux pane (with audit)
   audit                 Show recent audit log entries
+  providers <list|info> Inspect the multi-provider registry (Claude, Aider, …)
 
 Common flags:
   -h, --help            Show this help
@@ -106,6 +108,8 @@ export async function run(argv: string[]): Promise<number> {
         return await injectCmd(restArgs);
       case "audit":
         return await auditCmd(restArgs);
+      case "providers":
+        return await providersCmd(restArgs);
       case "help":
         process.stdout.write(HELP);
         return 0;

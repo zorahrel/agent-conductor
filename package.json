@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Pilot N concurrent AI coding agent CLI sessions from one place. JSONL transcript reader, deterministic status deriver, cwd-collision lock, tmux send-keys controller with audit log, macOS Reminders intent layer, and a `agent-conductor` CLI binary for terminal-driven workflows. Claude Code today, pluggable for Aider / Cursor CLI / others.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -39,6 +39,11 @@
       "types": "./dist/discovery/index.d.ts",
       "import": "./dist/discovery/index.js",
       "require": "./dist/discovery/index.cjs"
+    },
+    "./providers": {
+      "types": "./dist/providers/index.d.ts",
+      "import": "./dist/providers/index.js",
+      "require": "./dist/providers/index.cjs"
     }
   },
   "files": [

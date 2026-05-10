@@ -549,6 +549,259 @@ var claudeCodeProvider = {
     return out;
   }
 };
+function getAuditDir() {
+  return process.env.JARVIS_AUDIT_DIR ?? join(homedir(), ".claude", "jarvis", "orchestrator");
+}
+getAuditDir();
+var AUDIT_FILE_PATH = join(getAuditDir(), "audit.jsonl");
+var ROTATE_BYTES = 10 * 1024 * 1024;
+var writeQueue = Promise.resolve();
+function appendAudit(entry) {
+  writeQueue = writeQueue.then(async () => {
+    const dir = getAuditDir();
+    const path = join(dir, "audit.jsonl");
+    await promises.mkdir(dir, { recursive: true });
+    try {
+      const st = await promises.stat(path);
+      if (st.size > ROTATE_BYTES) {
+        const archive = `${path}.${Date.now()}`;
+        await promises.rename(path, archive);
+      }
+    } catch {
+    }
+    await promises.appendFile(path, JSON.stringify(entry) + "\n", "utf8");
+  }).catch(() => void 0);
+  return writeQueue;
+}
+
+// src/providers/claude-code.ts
+var claudeCodeProvider2 = {
+  name: "claude-code",
+  displayName: "Claude Code",
+  description: "Anthropic's Claude Code CLI. JSONL transcripts under ~/.claude/projects/, tmux send-keys for inject.",
+  async discover() {
+    return claudeCodeProvider.discover();
+  },
+  async readTranscript(session, limit) {
+    if (!session.transcriptPath) return null;
+    const lines = await readJsonlTailLines(session.transcriptPath, 256e3);
+    const turns = [];
+    for (const raw of lines) {
+      try {
+        const obj = JSON.parse(raw);
+        if (obj.type !== "assistant" && obj.type !== "user") continue;
+        const role = obj.message?.role;
+        if (role !== "assistant" && role !== "user") continue;
+        let content;
+        if (typeof obj.message?.content === "string") {
+          content = [{ type: "text", text: obj.message.content }];
+        } else if (Array.isArray(obj.message?.content)) {
+          content = obj.message.content;
+        } else {
+          content = [];
+        }
+        turns.push({
+          role,
+          content,
+          stop_reason: obj.message?.stop_reason ?? null,
+          timestamp: obj.timestamp ?? "",
+          uuid: obj.uuid ?? ""
+        });
+      } catch {
+      }
+    }
+    return turns.slice(Math.max(0, turns.length - limit));
+  },
+  async deriveStatus(session) {
+    return deriveRefinedStatus(session);
+  },
+  suggestNext(_session, lastAssistantSummary, refinedStatus) {
+    return suggestNext({ refinedStatus, lastAssistantSummary });
+  },
+  async inject(session, text) {
+    const pane = await findPaneForPid(session.pid).catch(() => null);
+    if (!pane) {
+      return { ok: false, reason: "no_tmux" };
+    }
+    await sendKeys(pane.pane, text);
+    const ts = Date.now();
+    await appendAudit({
+      ts,
+      pid: session.pid,
+      repo: session.repoName,
+      action: "inject",
+      text,
+      source: "user-approved"
+    });
+    return {
+      ok: true,
+      audit: { ts, pid: session.pid, text, method: "tmux:send-keys" }
+    };
+  }
+};
+var execFileAsync3 = promisify(execFile);
+async function cwdOf2(pid) {
+  try {
+    const { stdout } = await execFileAsync3(
+      "lsof",
+      ["-a", "-d", "cwd", "-p", String(pid), "-Fn"],
+      { timeout: 1500 }
+    );
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("n")) return line.slice(1) || null;
+    }
+  } catch {
+  }
+  return null;
+}
+var aiderProvider = {
+  name: "aider",
+  displayName: "Aider",
+  description: "AI pair-programming CLI. Markdown transcripts in .aider.chat.history.md. Full transcript parser arrives in v0.5; discovery + tmux inject work today.",
+  async discover() {
+    const processes = await listAllProcesses();
+    const out = [];
+    for (const p of processes) {
+      if (!/\baider\b/.test(p.command)) continue;
+      const cwd = await cwdOf2(p.pid) ?? process.cwd();
+      out.push({
+        pid: p.pid,
+        cwd,
+        repoName: basename(cwd),
+        branch: null,
+        status: "unknown",
+        hookEvent: null,
+        sessionId: null,
+        transcriptPath: null,
+        // v0.5 will resolve `.aider.chat.history.md`
+        lastActivity: Date.now(),
+        tty: null,
+        parentCommand: null,
+        preview: { lastUserMessage: null, lastAssistantText: null },
+        isRouterSpawned: false
+      });
+    }
+    return out;
+  },
+  async readTranscript() {
+    return null;
+  },
+  async deriveStatus(_session) {
+    return "idle";
+  },
+  suggestNext() {
+    return {
+      text: "Switch to the aider terminal and continue the conversation.",
+      action: { type: "none", reason: "aider provider transcript parser ships in v0.5" },
+      confidence: "low",
+      reason: "aider provider is a stub in v0.4 \u2014 discovery works, transcript+status do not"
+    };
+  },
+  async inject(session, text) {
+    const pane = await findPaneForPid(session.pid).catch(() => null);
+    if (!pane) return { ok: false, reason: "no_tmux" };
+    await sendKeys(pane.pane, text);
+    const ts = Date.now();
+    await appendAudit({
+      ts,
+      pid: session.pid,
+      repo: session.repoName,
+      action: "inject",
+      text,
+      source: "user-approved"
+    });
+    return { ok: true, audit: { ts, pid: session.pid, text, method: "tmux:send-keys" } };
+  }
+};
+var execFileAsync4 = promisify(execFile);
+async function cwdOf3(pid) {
+  try {
+    const { stdout } = await execFileAsync4(
+      "lsof",
+      ["-a", "-d", "cwd", "-p", String(pid), "-Fn"],
+      { timeout: 1500 }
+    );
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("n")) return line.slice(1) || null;
+    }
+  } catch {
+  }
+  return null;
+}
+var cursorCliProvider = {
+  name: "cursor-cli",
+  displayName: "Cursor CLI",
+  description: "Anysphere's Cursor CLI (`cursor-agent`). Transcript parser arrives in v0.5; discovery + tmux inject work today.",
+  async discover() {
+    const processes = await listAllProcesses();
+    const out = [];
+    for (const p of processes) {
+      if (!/cursor[- ]?agent/i.test(p.command)) continue;
+      const cwd = await cwdOf3(p.pid) ?? process.cwd();
+      out.push({
+        pid: p.pid,
+        cwd,
+        repoName: basename(cwd),
+        branch: null,
+        status: "unknown",
+        hookEvent: null,
+        sessionId: null,
+        transcriptPath: null,
+        lastActivity: Date.now(),
+        tty: null,
+        parentCommand: null,
+        preview: { lastUserMessage: null, lastAssistantText: null },
+        isRouterSpawned: false
+      });
+    }
+    return out;
+  },
+  async readTranscript() {
+    return null;
+  },
+  async deriveStatus() {
+    return "idle";
+  },
+  suggestNext() {
+    return {
+      text: "Switch to Cursor and continue the conversation.",
+      action: { type: "none", reason: "cursor-cli provider stub \u2014 full impl in v0.5" },
+      confidence: "low",
+      reason: "cursor-cli provider is a stub in v0.4"
+    };
+  },
+  async inject(session, text) {
+    const pane = await findPaneForPid(session.pid).catch(() => null);
+    if (!pane) return { ok: false, reason: "no_tmux" };
+    await sendKeys(pane.pane, text);
+    const ts = Date.now();
+    await appendAudit({
+      ts,
+      pid: session.pid,
+      repo: session.repoName,
+      action: "inject",
+      text,
+      source: "user-approved"
+    });
+    return { ok: true, audit: { ts, pid: session.pid, text, method: "tmux:send-keys" } };
+  }
+};
+
+// src/providers/registry.ts
+var registry = /* @__PURE__ */ new Map();
+function registerProvider(provider) {
+  registry.set(provider.name, provider);
+}
+function getProvider(name) {
+  return registry.get(name);
+}
+function allProviders() {
+  return Array.from(registry.values());
+}
+var DEFAULT_PROVIDER_NAME = "claude-code";
+registerProvider(claudeCodeProvider2);
+registerProvider(aiderProvider);
+registerProvider(cursorCliProvider);
 
 // src/cli/commands/_render.ts
 function renderJson(value) {
@@ -577,30 +830,53 @@ function renderTable(rows, cols) {
 }
 
 // src/cli/commands/snapshot.ts
-var HELP = `Usage: agent-conductor snapshot [--json] [--provider <name>]
+var HELP = `Usage: agent-conductor snapshot [--json] [--provider <name>] [--all-providers]
 
 Build OrchestratorSnapshot \u2014 every live AI coding session with refinedStatus,
 last assistant summary, suggestion, action, conflict, tmux mapping.
 
 Flags:
-  --json              Output raw OrchestratorSnapshot JSON
-  --provider <name>   Discovery provider (default: claude-code)
-  -h, --help          Show this help
+  --json                  Output raw OrchestratorSnapshot JSON
+  --provider <name>       Discovery provider (default: claude-code).
+                          Available: claude-code, aider, cursor-cli
+  --all-providers         Discover across every registered provider and merge
+  -h, --help              Show this help
+
+Examples:
+  agent-conductor snapshot
+  agent-conductor snapshot --provider aider
+  agent-conductor snapshot --all-providers
 `;
 async function snapshotCmd(args) {
   if (flagBool(args, "h", "help")) {
     process.stdout.write(HELP);
     return 0;
   }
-  const provider = flagString(args, "provider") ?? "claude-code";
-  if (provider !== "claude-code") {
-    process.stderr.write(
-      `agent-conductor: unknown provider '${provider}'. Available: claude-code (more in v0.4)
-`
+  const allMode = flagBool(args, "all-providers");
+  const providerName = flagString(args, "provider") ?? DEFAULT_PROVIDER_NAME;
+  let sessions;
+  if (allMode) {
+    const merged = await Promise.all(
+      allProviders().map(async (p) => {
+        try {
+          return await p.discover();
+        } catch {
+          return [];
+        }
+      })
     );
-    return 2;
+    sessions = merged.flat();
+  } else {
+    const provider = getProvider(providerName);
+    if (!provider) {
+      process.stderr.write(
+        `agent-conductor: unknown provider '${providerName}'. Run 'agent-conductor providers list' to see available providers.
+`
+      );
+      return 2;
+    }
+    sessions = await provider.discover();
   }
-  const sessions = await claudeCodeProvider.discover();
   if (sessions.length === 0) {
     if (flagBool(args, "json")) {
       process.stdout.write(JSON.stringify({ generated_at: (/* @__PURE__ */ new Date()).toISOString(), sessions: [] }, null, 2) + "\n");
@@ -635,30 +911,48 @@ Generated at: ${snap.generated_at}
 }
 
 // src/cli/commands/sessions.ts
-var HELP2 = `Usage: agent-conductor sessions [--json] [--provider <name>]
+var HELP2 = `Usage: agent-conductor sessions [--json] [--provider <name>] [--all-providers]
 
 Discover live AI coding agent sessions (provider-specific signature match
 on \`ps\`). Cheaper than \`snapshot\`: no JSONL reads, no conflict scan.
 
 Flags:
-  --json              Output JSON array
-  --provider <name>   Discovery provider (default: claude-code)
-  -h, --help          Show this help
+  --json                  Output JSON array
+  --provider <name>       Discovery provider (default: claude-code).
+                          Available: claude-code, aider, cursor-cli
+  --all-providers         Discover across every registered provider and merge
+  -h, --help              Show this help
 `;
 async function sessionsCmd(args) {
   if (flagBool(args, "h", "help")) {
     process.stdout.write(HELP2);
     return 0;
   }
-  const provider = flagString(args, "provider") ?? "claude-code";
-  if (provider !== "claude-code") {
-    process.stderr.write(
-      `agent-conductor: unknown provider '${provider}'. Available: claude-code
-`
+  const allMode = flagBool(args, "all-providers");
+  const providerName = flagString(args, "provider") ?? DEFAULT_PROVIDER_NAME;
+  let sessions;
+  if (allMode) {
+    const merged = await Promise.all(
+      allProviders().map(async (p) => {
+        try {
+          return await p.discover();
+        } catch {
+          return [];
+        }
+      })
     );
-    return 2;
+    sessions = merged.flat();
+  } else {
+    const provider = getProvider(providerName);
+    if (!provider) {
+      process.stderr.write(
+        `agent-conductor: unknown provider '${providerName}'. Run 'agent-conductor providers list' to see available providers.
+`
+      );
+      return 2;
+    }
+    sessions = await provider.discover();
   }
-  const sessions = await claudeCodeProvider.discover();
   if (flagBool(args, "json")) {
     renderJson(sessions);
     return 0;
@@ -1083,30 +1377,6 @@ async function runFind(args) {
   }
   return 0;
 }
-function getAuditDir() {
-  return process.env.JARVIS_AUDIT_DIR ?? join(homedir(), ".claude", "jarvis", "orchestrator");
-}
-getAuditDir();
-var AUDIT_FILE_PATH = join(getAuditDir(), "audit.jsonl");
-var ROTATE_BYTES = 10 * 1024 * 1024;
-var writeQueue = Promise.resolve();
-function appendAudit(entry) {
-  writeQueue = writeQueue.then(async () => {
-    const dir = getAuditDir();
-    const path = join(dir, "audit.jsonl");
-    await promises.mkdir(dir, { recursive: true });
-    try {
-      const st = await promises.stat(path);
-      if (st.size > ROTATE_BYTES) {
-        const archive = `${path}.${Date.now()}`;
-        await promises.rename(path, archive);
-      }
-    } catch {
-    }
-    await promises.appendFile(path, JSON.stringify(entry) + "\n", "utf8");
-  }).catch(() => void 0);
-  return writeQueue;
-}
 
 // src/cli/commands/inject.ts
 var HELP6 = `Usage: agent-conductor inject --pid <N> --text <string> [flags]
@@ -1264,20 +1534,133 @@ Showing last ${slice.length} of ${rows.length} entries from ${AUDIT_FILE_PATH}
   return 0;
 }
 
+// src/cli/commands/providers.ts
+var HELP8 = `Usage: agent-conductor providers <subcommand> [flags]
+
+Subcommands:
+  list                List every registered AgentProvider
+  info <name>         Show full description + capabilities for one provider
+
+Flags:
+  --json              JSON output
+  -h, --help          Show this help
+
+Examples:
+  agent-conductor providers list
+  agent-conductor providers info aider
+  agent-conductor providers list --json
+`;
+async function providersCmd(args) {
+  if (flagBool(args, "h", "help")) {
+    process.stdout.write(HELP8);
+    return 0;
+  }
+  const sub = args._[0];
+  switch (sub) {
+    case "list":
+      return runList2(args);
+    case "info":
+      return runInfo(args);
+    default:
+      process.stderr.write(`providers: unknown subcommand '${sub ?? ""}'
+
+`);
+      process.stderr.write(HELP8);
+      return 2;
+  }
+}
+function runList2(args) {
+  const providers = allProviders();
+  if (flagBool(args, "json")) {
+    renderJson(
+      providers.map((p) => ({
+        name: p.name,
+        displayName: p.displayName,
+        description: p.description,
+        isDefault: p.name === DEFAULT_PROVIDER_NAME
+      }))
+    );
+    return 0;
+  }
+  const cols = [
+    { header: "NAME", get: (p) => p.name },
+    { header: "DISPLAY", get: (p) => p.displayName, max: 18 },
+    { header: "DEFAULT", get: (p) => p.name === DEFAULT_PROVIDER_NAME ? "\u2605" : "" },
+    { header: "DESCRIPTION", get: (p) => p.description, max: 72 }
+  ];
+  renderTable(providers, cols);
+  process.stdout.write(`
+Registered: ${providers.length} provider(s). Default: ${DEFAULT_PROVIDER_NAME}
+`);
+  return 0;
+}
+function runInfo(args) {
+  const name = args._[1];
+  if (!name) {
+    process.stderr.write("providers info: missing <name>\n");
+    return 2;
+  }
+  const p = getProvider(name);
+  if (!p) {
+    process.stderr.write(
+      `providers info: '${name}' not registered. Run 'agent-conductor providers list' to see available providers.
+`
+    );
+    return 2;
+  }
+  if (flagBool(args, "json")) {
+    renderJson({
+      name: p.name,
+      displayName: p.displayName,
+      description: p.description,
+      isDefault: p.name === DEFAULT_PROVIDER_NAME,
+      capabilities: {
+        discover: true,
+        readTranscript: typeof p.readTranscript === "function",
+        deriveStatus: typeof p.deriveStatus === "function",
+        suggestNext: typeof p.suggestNext === "function",
+        inject: typeof p.inject === "function"
+      }
+    });
+    return 0;
+  }
+  process.stdout.write(`Provider:    ${p.displayName} (${p.name})${p.name === DEFAULT_PROVIDER_NAME ? "  \u2605 default" : ""}
+`);
+  process.stdout.write(`Description: ${p.description}
+
+`);
+  process.stdout.write(`Capabilities (all providers implement the AgentProvider interface;
+`);
+  process.stdout.write(`stub providers may return null / no-op until full implementation lands):
+`);
+  process.stdout.write(`  - discover()        : best-effort 'ps'-based scan
+`);
+  process.stdout.write(`  - readTranscript()  : reads provider-specific transcript format
+`);
+  process.stdout.write(`  - deriveStatus()    : awaiting_user_input | tool_pending | crashed | working | idle
+`);
+  process.stdout.write(`  - suggestNext()     : deterministic next-step (no LLM calls)
+`);
+  process.stdout.write(`  - inject()          : tmux send-keys (or provider-specific channel)
+`);
+  return 0;
+}
+
 // src/cli/index.ts
-var HELP8 = `agent-conductor \u2014 pilot N concurrent AI coding agent CLI sessions from one place.
+var HELP9 = `agent-conductor \u2014 pilot N concurrent AI coding agent CLI sessions from one place.
 
 Usage:
   agent-conductor <command> [flags]
 
 Commands:
-  snapshot              Build OrchestratorSnapshot for live Claude Code sessions
+  snapshot              Build OrchestratorSnapshot for live AI agent sessions
   sessions              List discovered sessions with refinedStatus
   transcript <path>     Project last-N turns from a JSONL transcript file
   todos <list|add|complete>   Manage Apple Reminders intent layer
   tmux <panes|find>     Inspect tmux pane mapping
   inject                Send keystrokes to a session's tmux pane (with audit)
   audit                 Show recent audit log entries
+  providers <list|info> Inspect the multi-provider registry (Claude, Aider, \u2026)
 
 Common flags:
   -h, --help            Show this help
@@ -1299,18 +1682,18 @@ Docs: https://github.com/zorahrel/agent-conductor
 async function run(argv) {
   const args = parseArgs(argv);
   if (flagBool(args, "h", "help") && args._.length === 0) {
-    process.stdout.write(HELP8);
+    process.stdout.write(HELP9);
     return 0;
   }
   if (flagBool(args, "v", "version")) {
-    const version = "0.3.0";
+    const version = "0.4.0";
     process.stdout.write(`agent-conductor v${version}
 `);
     return 0;
   }
   const [sub, ...subPositionals] = args._;
   if (!sub) {
-    process.stdout.write(HELP8);
+    process.stdout.write(HELP9);
     return 0;
   }
   const restArgs = { _: subPositionals, flags: args.flags };
@@ -1330,14 +1713,16 @@ async function run(argv) {
         return await injectCmd(restArgs);
       case "audit":
         return await auditCmd(restArgs);
+      case "providers":
+        return await providersCmd(restArgs);
       case "help":
-        process.stdout.write(HELP8);
+        process.stdout.write(HELP9);
         return 0;
       default:
         process.stderr.write(`agent-conductor: unknown command '${sub}'
 
 `);
-        process.stderr.write(HELP8);
+        process.stderr.write(HELP9);
         return 2;
     }
   } catch (err) {

@@ -23,6 +23,7 @@ export default defineConfig({
     "tmux/index": "src/tmux/index.ts",
     "reminders/index": "src/reminders/index.ts",
     "discovery/index": "src/discovery/index.ts",
+    "providers/index": "src/providers/index.ts",
     "cli/bin": "src/cli/bin.ts",
   },
   format: ["esm", "cjs"],

@@ -643,18 +643,372 @@ function stopReminderPolling() {
   }
   prevState = [];
 }
+var execFileAsync = util.promisify(child_process.execFile);
+async function listAllProcesses() {
+  try {
+    const { stdout } = await execFileAsync("ps", [
+      "-axwo",
+      "pid=,ppid=,command="
+    ], { maxBuffer: 8 * 1024 * 1024 });
+    return parsePsOutput(stdout);
+  } catch {
+    return [];
+  }
+}
+function parsePsOutput(stdout) {
+  const rows = [];
+  for (const raw of stdout.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const m = line.match(/^\s*(\d+)\s+(\d+)\s+(.+)$/);
+    if (!m) continue;
+    const pid = Number(m[1]);
+    const ppid = Number(m[2]);
+    const command = m[3];
+    if (Number.isFinite(pid) && Number.isFinite(ppid)) {
+      rows.push({ pid, ppid, command });
+    }
+  }
+  return rows;
+}
+
+// src/discovery/claude-code.ts
+var execFileAsync2 = util.promisify(child_process.execFile);
+var CLAUDE_PATTERNS = [
+  /\/claude\b/,
+  /[/ ]node\b.+\bclaude\b/,
+  /[/ ]claude --print/,
+  /Claude\.app/
+];
+function looksLikeClaude(command) {
+  return CLAUDE_PATTERNS.some((re) => re.test(command));
+}
+async function cwdOf(pid) {
+  try {
+    const { stdout } = await execFileAsync2(
+      "lsof",
+      ["-a", "-d", "cwd", "-p", String(pid), "-Fn"],
+      { timeout: 1500 }
+    );
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("n")) return line.slice(1) || null;
+    }
+  } catch {
+  }
+  return null;
+}
+function encodeProjectPath(cwd) {
+  return cwd.replace(/\//g, "-");
+}
+async function findTranscriptForCwd(cwd) {
+  const root = path.join(os.homedir(), ".claude", "projects", encodeProjectPath(cwd));
+  let entries;
+  try {
+    entries = await fs.promises.readdir(root);
+  } catch {
+    return null;
+  }
+  let newest = null;
+  for (const name of entries) {
+    if (!name.endsWith(".jsonl")) continue;
+    const path$1 = path.join(root, name);
+    try {
+      const st = await fs.promises.stat(path$1);
+      if (!newest || st.mtimeMs > newest.mtime) {
+        newest = { path: path$1, mtime: st.mtimeMs };
+      }
+    } catch {
+    }
+  }
+  return newest?.path ?? null;
+}
+async function gitBranchOf(cwd) {
+  try {
+    const { stdout } = await execFileAsync2(
+      "git",
+      ["-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
+      { timeout: 1500 }
+    );
+    return stdout.trim() || null;
+  } catch {
+    return null;
+  }
+}
+var claudeCodeProvider = {
+  name: "claude-code",
+  async discover() {
+    const processes = await listAllProcesses();
+    const candidates = processes.filter((p) => looksLikeClaude(p.command));
+    const out = [];
+    for (const p of candidates) {
+      const cwd = await cwdOf(p.pid) ?? process.cwd();
+      const branch = await gitBranchOf(cwd);
+      const transcriptPath = await findTranscriptForCwd(cwd);
+      out.push({
+        pid: p.pid,
+        cwd,
+        repoName: path.basename(cwd),
+        branch,
+        status: "unknown",
+        hookEvent: null,
+        sessionId: null,
+        transcriptPath,
+        lastActivity: Date.now(),
+        tty: null,
+        parentCommand: null,
+        preview: { lastUserMessage: null, lastAssistantText: null },
+        isRouterSpawned: false
+      });
+    }
+    return out;
+  }
+};
+
+// src/providers/claude-code.ts
+var claudeCodeProvider2 = {
+  name: "claude-code",
+  displayName: "Claude Code",
+  description: "Anthropic's Claude Code CLI. JSONL transcripts under ~/.claude/projects/, tmux send-keys for inject.",
+  async discover() {
+    return claudeCodeProvider.discover();
+  },
+  async readTranscript(session, limit) {
+    if (!session.transcriptPath) return null;
+    const lines = await readJsonlTailLines(session.transcriptPath, 256e3);
+    const turns = [];
+    for (const raw of lines) {
+      try {
+        const obj = JSON.parse(raw);
+        if (obj.type !== "assistant" && obj.type !== "user") continue;
+        const role = obj.message?.role;
+        if (role !== "assistant" && role !== "user") continue;
+        let content;
+        if (typeof obj.message?.content === "string") {
+          content = [{ type: "text", text: obj.message.content }];
+        } else if (Array.isArray(obj.message?.content)) {
+          content = obj.message.content;
+        } else {
+          content = [];
+        }
+        turns.push({
+          role,
+          content,
+          stop_reason: obj.message?.stop_reason ?? null,
+          timestamp: obj.timestamp ?? "",
+          uuid: obj.uuid ?? ""
+        });
+      } catch {
+      }
+    }
+    return turns.slice(Math.max(0, turns.length - limit));
+  },
+  async deriveStatus(session) {
+    return deriveRefinedStatus(session);
+  },
+  suggestNext(_session, lastAssistantSummary, refinedStatus) {
+    return suggestNext({ refinedStatus, lastAssistantSummary });
+  },
+  async inject(session, text) {
+    const pane = await findPaneForPid(session.pid).catch(() => null);
+    if (!pane) {
+      return { ok: false, reason: "no_tmux" };
+    }
+    await sendKeys(pane.pane, text);
+    const ts = Date.now();
+    await appendAudit({
+      ts,
+      pid: session.pid,
+      repo: session.repoName,
+      action: "inject",
+      text,
+      source: "user-approved"
+    });
+    return {
+      ok: true,
+      audit: { ts, pid: session.pid, text, method: "tmux:send-keys" }
+    };
+  }
+};
+var execFileAsync3 = util.promisify(child_process.execFile);
+async function cwdOf2(pid) {
+  try {
+    const { stdout } = await execFileAsync3(
+      "lsof",
+      ["-a", "-d", "cwd", "-p", String(pid), "-Fn"],
+      { timeout: 1500 }
+    );
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("n")) return line.slice(1) || null;
+    }
+  } catch {
+  }
+  return null;
+}
+var aiderProvider = {
+  name: "aider",
+  displayName: "Aider",
+  description: "AI pair-programming CLI. Markdown transcripts in .aider.chat.history.md. Full transcript parser arrives in v0.5; discovery + tmux inject work today.",
+  async discover() {
+    const processes = await listAllProcesses();
+    const out = [];
+    for (const p of processes) {
+      if (!/\baider\b/.test(p.command)) continue;
+      const cwd = await cwdOf2(p.pid) ?? process.cwd();
+      out.push({
+        pid: p.pid,
+        cwd,
+        repoName: path.basename(cwd),
+        branch: null,
+        status: "unknown",
+        hookEvent: null,
+        sessionId: null,
+        transcriptPath: null,
+        // v0.5 will resolve `.aider.chat.history.md`
+        lastActivity: Date.now(),
+        tty: null,
+        parentCommand: null,
+        preview: { lastUserMessage: null, lastAssistantText: null },
+        isRouterSpawned: false
+      });
+    }
+    return out;
+  },
+  async readTranscript() {
+    return null;
+  },
+  async deriveStatus(_session) {
+    return "idle";
+  },
+  suggestNext() {
+    return {
+      text: "Switch to the aider terminal and continue the conversation.",
+      action: { type: "none", reason: "aider provider transcript parser ships in v0.5" },
+      confidence: "low",
+      reason: "aider provider is a stub in v0.4 \u2014 discovery works, transcript+status do not"
+    };
+  },
+  async inject(session, text) {
+    const pane = await findPaneForPid(session.pid).catch(() => null);
+    if (!pane) return { ok: false, reason: "no_tmux" };
+    await sendKeys(pane.pane, text);
+    const ts = Date.now();
+    await appendAudit({
+      ts,
+      pid: session.pid,
+      repo: session.repoName,
+      action: "inject",
+      text,
+      source: "user-approved"
+    });
+    return { ok: true, audit: { ts, pid: session.pid, text, method: "tmux:send-keys" } };
+  }
+};
+var execFileAsync4 = util.promisify(child_process.execFile);
+async function cwdOf3(pid) {
+  try {
+    const { stdout } = await execFileAsync4(
+      "lsof",
+      ["-a", "-d", "cwd", "-p", String(pid), "-Fn"],
+      { timeout: 1500 }
+    );
+    for (const line of stdout.split("\n")) {
+      if (line.startsWith("n")) return line.slice(1) || null;
+    }
+  } catch {
+  }
+  return null;
+}
+var cursorCliProvider = {
+  name: "cursor-cli",
+  displayName: "Cursor CLI",
+  description: "Anysphere's Cursor CLI (`cursor-agent`). Transcript parser arrives in v0.5; discovery + tmux inject work today.",
+  async discover() {
+    const processes = await listAllProcesses();
+    const out = [];
+    for (const p of processes) {
+      if (!/cursor[- ]?agent/i.test(p.command)) continue;
+      const cwd = await cwdOf3(p.pid) ?? process.cwd();
+      out.push({
+        pid: p.pid,
+        cwd,
+        repoName: path.basename(cwd),
+        branch: null,
+        status: "unknown",
+        hookEvent: null,
+        sessionId: null,
+        transcriptPath: null,
+        lastActivity: Date.now(),
+        tty: null,
+        parentCommand: null,
+        preview: { lastUserMessage: null, lastAssistantText: null },
+        isRouterSpawned: false
+      });
+    }
+    return out;
+  },
+  async readTranscript() {
+    return null;
+  },
+  async deriveStatus() {
+    return "idle";
+  },
+  suggestNext() {
+    return {
+      text: "Switch to Cursor and continue the conversation.",
+      action: { type: "none", reason: "cursor-cli provider stub \u2014 full impl in v0.5" },
+      confidence: "low",
+      reason: "cursor-cli provider is a stub in v0.4"
+    };
+  },
+  async inject(session, text) {
+    const pane = await findPaneForPid(session.pid).catch(() => null);
+    if (!pane) return { ok: false, reason: "no_tmux" };
+    await sendKeys(pane.pane, text);
+    const ts = Date.now();
+    await appendAudit({
+      ts,
+      pid: session.pid,
+      repo: session.repoName,
+      action: "inject",
+      text,
+      source: "user-approved"
+    });
+    return { ok: true, audit: { ts, pid: session.pid, text, method: "tmux:send-keys" } };
+  }
+};
+
+// src/providers/registry.ts
+var registry = /* @__PURE__ */ new Map();
+function registerProvider(provider) {
+  registry.set(provider.name, provider);
+}
+function getProvider(name) {
+  return registry.get(name);
+}
+function allProviders() {
+  return Array.from(registry.values());
+}
+var DEFAULT_PROVIDER_NAME = "claude-code";
+registerProvider(claudeCodeProvider2);
+registerProvider(aiderProvider);
+registerProvider(cursorCliProvider);
 
 exports.AUDIT_DIR = AUDIT_DIR;
 exports.AUDIT_FILE_PATH = AUDIT_FILE_PATH;
+exports.DEFAULT_PROVIDER_NAME = DEFAULT_PROVIDER_NAME;
 exports.ROTATE_BYTES = ROTATE_BYTES;
 exports.addTodo = addTodo;
+exports.aiderProvider = aiderProvider;
+exports.allProviders = allProviders;
 exports.appendAudit = appendAudit;
 exports.buildSnapshot = buildSnapshot;
 exports.buildTranscript = buildTranscript;
 exports.capturePane = capturePane;
+exports.claudeCodeAgentProvider = claudeCodeProvider2;
 exports.completeTodo = completeTodo;
 exports.composeSnapshot = composeSnapshot;
 exports.countTurns = countTurns;
+exports.cursorCliProvider = cursorCliProvider;
 exports.deriveRefinedStatus = deriveRefinedStatus;
 exports.detectConflict = detectConflict;
 exports.diffTodos = diffTodos;
@@ -665,6 +1019,7 @@ exports.findGitRoot = findGitRoot;
 exports.findPaneForPid = findPaneForPid;
 exports.formatTodoMetadata = formatTodoMetadata;
 exports.getActiveCli = getActiveCli;
+exports.getProvider = getProvider;
 exports.getStopReason = getStopReason;
 exports.listAllPanes = listAllPanes;
 exports.listTodos = listTodos;
@@ -672,6 +1027,7 @@ exports.parseTodoMetadata = parseTodoMetadata;
 exports.probeAuth = probeAuth;
 exports.readJsonlTailLines = readJsonlTailLines;
 exports.refinedStatusFor = refinedStatusFor;
+exports.registerProvider = registerProvider;
 exports.sendKeys = sendKeys;
 exports.startReminderPolling = startReminderPolling;
 exports.stopReminderPolling = stopReminderPolling;

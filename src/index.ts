@@ -107,3 +107,21 @@ export type {
   LocalSession,
   LocalSessionStatus,
 } from "./types/local-session.js";
+
+// Providers (multi-provider architecture)
+export type {
+  AgentProvider,
+  InjectResult,
+  TranscriptTurnShape,
+} from "./providers/types.js";
+
+export {
+  registerProvider,
+  getProvider,
+  allProviders,
+  DEFAULT_PROVIDER_NAME,
+} from "./providers/registry.js";
+
+export { claudeCodeProvider as claudeCodeAgentProvider } from "./providers/claude-code.js";
+export { aiderProvider } from "./providers/aider.js";
+export { cursorCliProvider } from "./providers/cursor-cli.js";

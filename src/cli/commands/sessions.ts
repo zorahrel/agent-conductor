@@ -3,20 +3,26 @@
  * Cheaper than `snapshot` (no transcript reads, no conflict map, no tmux walk).
  */
 
-import { claudeCodeProvider } from "../../discovery/claude-code.js";
+import {
+  getProvider,
+  allProviders,
+  DEFAULT_PROVIDER_NAME,
+} from "../../providers/registry.js";
 import type { ParsedArgs } from "../args.js";
 import { flagBool, flagString } from "../args.js";
 import { renderJson, renderTable, type Column } from "./_render.js";
 
-const HELP = `Usage: agent-conductor sessions [--json] [--provider <name>]
+const HELP = `Usage: agent-conductor sessions [--json] [--provider <name>] [--all-providers]
 
 Discover live AI coding agent sessions (provider-specific signature match
 on \`ps\`). Cheaper than \`snapshot\`: no JSONL reads, no conflict scan.
 
 Flags:
-  --json              Output JSON array
-  --provider <name>   Discovery provider (default: claude-code)
-  -h, --help          Show this help
+  --json                  Output JSON array
+  --provider <name>       Discovery provider (default: claude-code).
+                          Available: claude-code, aider, cursor-cli
+  --all-providers         Discover across every registered provider and merge
+  -h, --help              Show this help
 `;
 
 export async function sessionsCmd(args: ParsedArgs): Promise<number> {
@@ -24,14 +30,31 @@ export async function sessionsCmd(args: ParsedArgs): Promise<number> {
     process.stdout.write(HELP);
     return 0;
   }
-  const provider = flagString(args, "provider") ?? "claude-code";
-  if (provider !== "claude-code") {
-    process.stderr.write(
-      `agent-conductor: unknown provider '${provider}'. Available: claude-code\n`,
+  const allMode = flagBool(args, "all-providers");
+  const providerName = flagString(args, "provider") ?? DEFAULT_PROVIDER_NAME;
+
+  let sessions;
+  if (allMode) {
+    const merged = await Promise.all(
+      allProviders().map(async (p) => {
+        try {
+          return await p.discover();
+        } catch {
+          return [];
+        }
+      }),
     );
-    return 2;
+    sessions = merged.flat();
+  } else {
+    const provider = getProvider(providerName);
+    if (!provider) {
+      process.stderr.write(
+        `agent-conductor: unknown provider '${providerName}'. Run 'agent-conductor providers list' to see available providers.\n`,
+      );
+      return 2;
+    }
+    sessions = await provider.discover();
   }
-  const sessions = await claudeCodeProvider.discover();
 
   if (flagBool(args, "json")) {
     renderJson(sessions);

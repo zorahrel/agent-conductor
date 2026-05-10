@@ -4,6 +4,29 @@ All notable changes to `agent-conductor` are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 the project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0] — 2026-05-11
+
+### Added
+
+- **Multi-provider architecture** — every command now accepts `--provider <name>`. The library exposes an `AgentProvider` interface (`discover` + `readTranscript` + `deriveStatus` + `suggestNext` + `inject`) and a registry consumers can extend.
+- **3 built-in providers**:
+  - `claude-code` ★ — full implementation, default
+  - `aider` — discovery + tmux inject (transcript parser planned for v0.5)
+  - `cursor-cli` — discovery only (`cursor-agent` process pattern; full impl planned for v0.5)
+- **`agent-conductor providers <list|info>` CLI subcommand** to inspect the registry.
+- **`--all-providers` flag** on `snapshot` and `sessions` to merge results across every registered provider.
+- **8 new provider registry tests** (`src/providers/registry.spec.ts`).
+
+### Changed
+
+- `agent-conductor snapshot` and `agent-conductor sessions` route through the provider registry instead of importing `discovery/claude-code.js` directly.
+- README and CHANGELOG now lead with multi-provider as a first-class feature.
+
+### Notes
+
+- Aider and Cursor CLI providers are intentionally honest stubs: discovery works, but transcript parsing requires per-provider format support that lands in v0.5 (markdown for Aider, JSONL-like for Cursor).
+- The provider registry is global (process-wide). For library consumers that need multiple registries, this can be parameterised in a future minor.
+
 ## [0.3.0] — 2026-05-11
 
 ### Added
