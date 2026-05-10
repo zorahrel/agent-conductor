@@ -1,6 +1,7 @@
 node_modules/
-dist/
 .tsbuildinfo
+# NOTE: dist/ is committed (this is a private git-distributed package — consumers install via
+# `github:zorahrel/agent-conductor#vX.Y.Z` and need pre-built artifacts).
 *.log
 .DS_Store
 .env

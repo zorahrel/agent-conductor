@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Toolkit to observe, suggest next-step, and inject commands across N concurrent AI coding agent CLI sessions (Claude Code today; pluggable provider model for Aider / Cursor CLI / others). Includes JSONL transcript reader, deterministic status deriver, cwd-collision lock, tmux send-keys controller with audit log, and macOS Reminders bridge as intent layer.",
   "type": "module",
   "main": "./dist/index.cjs",
