@@ -1,0 +1,41 @@
+name: Feature request
+description: Suggest an idea or improvement
+title: "[feat] "
+labels: ["enhancement", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before opening: scan the roadmap in README.md — many ideas are already on the v0.3/0.4/0.5 lists. If yours is there, comment on the existing tracking issue instead.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      placeholder: |
+        Today I have to do X manually because the CLI doesn't support Y. Concretely: …
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      placeholder: |
+        Add `agent-conductor <subcommand>` that does Z. The flag shape would be: …
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+
+  - type: checkboxes
+    id: scope-check
+    attributes:
+      label: Scope check
+      options:
+        - label: This stays local — no network calls or remote services
+        - label: It does not require a new runtime dependency
+        - label: It does not require a new global mutable state

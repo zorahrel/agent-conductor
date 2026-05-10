@@ -1,0 +1,54 @@
+import { R as RefinedStatus } from './sessions-CdTstnnc.cjs';
+
+type LocalSessionStatus = "working" | "idle" | "waiting" | "finished" | "errored" | "unknown";
+interface LocalSession {
+    pid: number;
+    cwd: string;
+    repoName: string;
+    branch: string | null;
+    status: LocalSessionStatus;
+    hookEvent: string | null;
+    sessionId: string | null;
+    transcriptPath: string | null;
+    lastActivity: number;
+    tty: string | null;
+    parentCommand: string | null;
+    preview: {
+        lastUserMessage: string | null;
+        lastAssistantText: string | null;
+    };
+    isRouterSpawned: boolean;
+    /** Live token count if known (router-spawned: from SDK task_progress; bare CLI: from JSONL tail). */
+    liveTokens?: number;
+    /** Source signal that produced liveTokens. */
+    liveTokensSource?: "sdk-task-progress" | "sdk-result" | "jsonl-tail" | "unknown";
+    /** Wall-clock ms when liveTokens was captured. */
+    liveTokensAt?: number;
+    /** Model context window in tokens (e.g. 200000). */
+    contextWindow?: number;
+    /** Cost in USD of the most recent completed turn. */
+    lastTurnCostUsd?: number;
+    /** Resolved Claude model id (e.g. "claude-sonnet-4-6"). */
+    model?: string;
+    /** Compaction count for the current session (router-spawned only). 0 if unknown. */
+    compactionCount?: number;
+    /** Router session key (e.g. "telegram:123456:jarvis") if router-spawned and sidecar resolved. */
+    sessionKey?: string;
+    /** Agent name (resolved from sidecar if router-spawned). */
+    agent?: string;
+    /** fullAccess flag for the agent (resolved from sidecar). */
+    fullAccess?: boolean;
+    /** inheritUserScope flag for the agent (resolved from sidecar). */
+    inheritUserScope?: boolean;
+    /** Refined 5-state status (awaiting_user_input | tool_pending | crashed | working | idle). */
+    refinedStatus?: RefinedStatus;
+    /** Resolved tmux pane mapping (Plan 02-04 wires the resolver — Plan 02-01 always emits null). */
+    tmux?: {
+        session: string;
+        pane: string;
+    } | null;
+    /** Other session pid that conflicts on this cwd (sub-path with same git root). */
+    lockConflict?: number | null;
+}
+
+export type { LocalSession as L, LocalSessionStatus as a };

@@ -6,11 +6,13 @@
   **Pilot N concurrent AI coding agent CLI sessions from one place.**
 
   <p>
-    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.2.0-6366f1?style=flat-square" alt="version"/></a>
+    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.3.0-6366f1?style=flat-square" alt="version"/></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="license"/></a>
-    <img src="https://img.shields.io/badge/tests-68%20green-22c55e?style=flat-square" alt="tests"/>
+    <a href="https://github.com/zorahrel/agent-conductor/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zorahrel/agent-conductor/ci.yml?branch=main&label=ci&style=flat-square" alt="ci"/></a>
+    <img src="https://img.shields.io/badge/tests-101%20green-22c55e?style=flat-square" alt="tests"/>
     <img src="https://img.shields.io/badge/node-%E2%89%A520-3b82f6?style=flat-square" alt="node"/>
     <img src="https://img.shields.io/badge/typescript-strict-3178c6?style=flat-square" alt="ts"/>
+    <img src="https://img.shields.io/badge/runtime%20deps-0-22c55e?style=flat-square" alt="zero-deps"/>
     <img src="https://img.shields.io/badge/platform-macOS-0f172a?style=flat-square" alt="platform"/>
   </p>
 </div>
@@ -40,12 +42,35 @@ The logic isn't tied to any specific orchestrator. It started as Phase 2 of an i
 ## Install
 
 ```bash
-npm install github:zorahrel/agent-conductor#v0.2.0
+npm install github:zorahrel/agent-conductor#v0.3.0
 # or pin to a specific commit
 npm install github:zorahrel/agent-conductor#<sha>
 ```
 
-> Distributed via git URL (private-pattern). The `dist/` directory is committed so consumers don't need to build the package.
+> Distributed via git URL. The `dist/` directory is committed so consumers don't need to build the package. NPM-registry publish is on the v0.4 roadmap.
+
+## CLI
+
+After installation, the `agent-conductor` command is available globally (when installed with `-g`) or via `npx agent-conductor` / `./node_modules/.bin/agent-conductor`:
+
+```bash
+agent-conductor --help                         # show all subcommands
+agent-conductor snapshot                       # pretty table of every live session
+agent-conductor snapshot --json                # raw OrchestratorSnapshot JSON
+agent-conductor sessions                       # discovery-only (cheaper than snapshot)
+agent-conductor transcript path/to/file.jsonl --limit 5
+agent-conductor todos list --list AgentTasks
+agent-conductor todos add "Refactor auth" --pid 1234 --repo demo-app --phase plan
+agent-conductor todos complete REM-001
+agent-conductor tmux panes                     # all tmux panes (pid → session+pane)
+agent-conductor tmux find 12345                # which pane owns this pid?
+agent-conductor inject --pid 12345 --text y    # send "y\n" to the pane (with audit)
+agent-conductor inject --pid 12345 --text y --force   # bypass cwd-collision check
+agent-conductor inject --pid 12345 --text y --dry-run # log only, no send
+agent-conductor audit --tail 20                # recent audit log entries
+```
+
+Exit codes: `0` success, `1` generic error, `2` usage error, `3` precondition failure (no tmux, list missing, etc.). Stable contract for scripts.
 
 ## Quick start
 

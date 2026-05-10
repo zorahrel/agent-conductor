@@ -1,0 +1,79 @@
+name: Bug report
+description: Something doesn't work as documented
+title: "[bug] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more reproducible details you can include, the faster it gets fixed.
+
+  - type: input
+    id: version
+    attributes:
+      label: agent-conductor version
+      placeholder: "0.3.0 (or commit SHA)"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Affected surface
+      multiple: true
+      options:
+        - CLI binary (`agent-conductor` command)
+        - Library import (Node.js consumer)
+        - JSONL parser (`agent-conductor/jsonl`)
+        - Sessions (`agent-conductor/sessions`)
+        - tmux (`agent-conductor/tmux`)
+        - Reminders (`agent-conductor/reminders`)
+        - Discovery (`agent-conductor/discovery`)
+        - TypeScript types
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os
+    attributes:
+      label: OS + Node version
+      placeholder: "macOS 14.5 + Node 20.18.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      placeholder: |
+        I ran `agent-conductor inject --pid 123 --text y` and got…
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-expected
+    attributes:
+      label: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Reproduction steps
+      placeholder: |
+        1. `npm install github:zorahrel/agent-conductor#v0.3.0`
+        2. Start a tmux session…
+        3. Run `agent-conductor snapshot`
+        4. See error
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs / stack trace
+      render: shell

@@ -1,11 +1,14 @@
 {
   "name": "agent-conductor",
-  "version": "0.2.0",
-  "description": "Toolkit to observe, suggest next-step, and inject commands across N concurrent AI coding agent CLI sessions. JSONL transcript reader, deterministic status deriver, cwd-collision lock, tmux send-keys controller with audit log, and macOS Reminders bridge as intent layer. Claude Code today, pluggable provider model for Aider / Cursor CLI / others.",
+  "version": "0.3.0",
+  "description": "Pilot N concurrent AI coding agent CLI sessions from one place. JSONL transcript reader, deterministic status deriver, cwd-collision lock, tmux send-keys controller with audit log, macOS Reminders intent layer, and a `agent-conductor` CLI binary for terminal-driven workflows. Claude Code today, pluggable for Aider / Cursor CLI / others.",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "bin": {
+    "agent-conductor": "./dist/cli/bin.js"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -31,12 +34,18 @@
       "types": "./dist/reminders/index.d.ts",
       "import": "./dist/reminders/index.js",
       "require": "./dist/reminders/index.cjs"
+    },
+    "./discovery": {
+      "types": "./dist/discovery/index.d.ts",
+      "import": "./dist/discovery/index.js",
+      "require": "./dist/discovery/index.cjs"
     }
   },
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "CHANGELOG.md"
   ],
   "scripts": {
     "build": "tsup",
@@ -44,19 +53,25 @@
     "typecheck": "tsc --noEmit",
     "test": "tsx --test 'src/**/*.spec.ts'",
     "test:once": "tsx --test 'src/**/*.spec.ts' --test-reporter spec",
+    "test:cli": "bash tests/cli.bats.sh",
+    "test:all": "npm test && npm run test:cli",
     "prepublishOnly": "npm run build"
   },
   "keywords": [
     "claude-code",
     "ai-agent",
     "cli-orchestration",
+    "cli",
+    "terminal",
     "tmux",
     "session-management",
     "transcript-parser",
     "apple-reminders",
     "agent-coordinator",
     "multi-session",
-    "macos"
+    "macos",
+    "aider",
+    "cursor"
   ],
   "author": "zorahrel",
   "license": "MIT",
