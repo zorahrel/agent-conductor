@@ -1,81 +1,180 @@
-# agent-conductor
+<div align="center">
+  <img src="./assets/logo.svg" alt="agent-conductor logo" width="160" height="160"/>
 
-Toolkit per **osservare, suggerire next-step, e iniettare comandi** attraverso N sessioni concorrenti di AI coding agent CLI da un singolo punto di controllo.
+  # agent-conductor
 
-Estratto da [jarvis-claudecode](https://github.com/zorahrel/jarvis-claudecode) Phase 2 (Orchestrator Multi-Session) per essere riusabile come libreria in Jarvis, Topics App, e potenziali altri consumer.
+  **Pilot N concurrent AI coding agent CLI sessions from one place.**
 
-## Cosa fa
+  <p>
+    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.2.0-6366f1?style=flat-square" alt="version"/></a>
+    <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="license"/></a>
+    <img src="https://img.shields.io/badge/tests-68%20green-22c55e?style=flat-square" alt="tests"/>
+    <img src="https://img.shields.io/badge/node-%E2%89%A520-3b82f6?style=flat-square" alt="node"/>
+    <img src="https://img.shields.io/badge/typescript-strict-3178c6?style=flat-square" alt="ts"/>
+    <img src="https://img.shields.io/badge/platform-macOS-0f172a?style=flat-square" alt="platform"/>
+  </p>
+</div>
 
-- **Read-only observatory**: legge i transcript JSONL delle sessioni Claude Code (`~/.claude/projects/`) e deriva uno stato raffinato per sessione (`awaiting_user_input` / `tool_pending` / `crashed` / `working` / `idle`)
-- **Deterministic suggestion engine**: produce un `next-step` ragionato per ogni sessione senza chiamare LLM
-- **Cwd-collision lock**: rileva conflitti tra sessioni che lavorano sullo stesso path (worktree-aware via `.git` root walk)
-- **tmux inject control**: mappa `pid → pane`, esegue `tmux send-keys` con audit log JSONL append-only (rotation a 10 MB)
-- **macOS Reminders bridge**: wrapper attorno a `remindctl` (con fallback `apple-reminders-cli` / `ekctl`) come "intent layer" sincronizzato con iPhone/Watch/Siri; polling diff a 3s + metadata schema `pid:N repo:X phase:Y`
+---
 
-## Roadmap provider
+## What it does
 
-v0.1 è Claude Code only. La sezione `sessions/` è già strutturata come libreria pura (legge JSONL standard, deriva stato) → v0.2 prevista per Aider, Cursor CLI, e altri tool che salvano transcript on disk.
+When you're running 3+ Claude Code (or other AI coding agent) CLI sessions in parallel — across tmux panes, separate terminals, or both — keeping track of which one needs your attention is a context-switching nightmare.
 
-## Installazione
+`agent-conductor` is the toolkit that turns N scattered sessions into one observable, controllable, auditable surface.
 
-Privato, distribuito via git URL:
+- **Read-only observatory** — parses each session's JSONL transcript without re-reading the full file (tails the last N bytes) and derives a refined 5-state status: `awaiting_user_input` / `tool_pending` / `crashed` / `working` / `idle`
+- **Deterministic suggestion engine** — produces a next-step recommendation per session via a lookup table (no LLM calls, no token cost, no flakiness)
+- **Cwd-collision lock** — detects when two sessions are working on the same path. Worktree-aware: walks `.git` roots so sibling worktrees don't false-positive
+- **tmux inject control** — maps `pid → pane` via parent-walk, sends keystrokes via `tmux send-keys`, and writes an append-only audit log (JSONL with 10 MB rotation)
+- **macOS Reminders bridge** — treats Apple Reminders as the intent layer. New todos sync to iPhone / Watch / Siri; check them off anywhere, the polling diff loop emits `todo:added` / `todo:completed` / `todo:updated`
+
+## Why a separate library
+
+The logic isn't tied to any specific orchestrator. It started as Phase 2 of an internal multi-channel router project, but the data flow is universal: any consumer that wants to monitor and pilot multiple agent CLI processes on the same machine needs exactly these primitives. Extracting them into a library means:
+
+- Single source of truth — fix a bug once, benefit everywhere
+- Pluggable provider model — v0.1 is Claude Code only; v0.2 adds Aider, Cursor CLI, ChatGPT CLI adapters
+- Data-source agnostic — `buildSnapshot(sessions)` takes sessions as a parameter; callers bring their own discovery (ps+lsof, registry, fixtures)
+
+## Install
 
 ```bash
-npm install github:zorahrel/agent-conductor#v0.1.0
-# o pinning sul commit
+npm install github:zorahrel/agent-conductor#v0.2.0
+# or pin to a specific commit
 npm install github:zorahrel/agent-conductor#<sha>
 ```
 
-## Uso base
+> Distributed via git URL (private-pattern). The `dist/` directory is committed so consumers don't need to build the package.
+
+## Quick start
 
 ```typescript
-import { buildSnapshot, listTodos, sendKeys } from "agent-conductor";
+import {
+  buildSnapshot,
+  listTodos,
+  addTodo,
+  sendKeys,
+  appendAudit,
+} from "agent-conductor";
 
-// Snapshot di tutte le sessioni live
-const snapshot = await buildSnapshot();
-console.log(snapshot.sessions);
-// [{ pid, repo, branch, status, last_assistant_summary, suggestion, action, todo_link, tmux }]
+// 1. Snapshot every live AI coding session on this machine
+const sessions = await myDiscoveryFunction();   // your registry / ps+lsof
+const snap = await buildSnapshot(sessions);
+console.log(snap.sessions);
+// → [{ pid, repo, branch, status, last_assistant_summary, suggestion, action, todo_link, tmux, conflict }]
 
-// Lettura todo Reminders
-const todos = await listTodos({ list: "Jarvis/ActiveTasks" });
+// 2. Read intent from Apple Reminders (macOS only)
+const todos = await listTodos({ list: "AgentTasks" });
+const newTodo = await addTodo({
+  title: "Refactor auth module",
+  body: "pid:1234 repo:demo-app phase:plan",
+  list: "AgentTasks",
+});
 
-// Inject su una sessione (con audit)
-await sendKeys({
-  paneId: "%17",
+// 3. Pilot a session: send Enter to approve a plan in tmux pane %17
+await sendKeys({ paneId: "%17", text: "y", enter: true });
+await appendAudit({
+  pid: 1234,
+  repo: "demo-app",
+  action: "inject",
   text: "y",
   source: "user-approved",
-  audit: { pid: 1234, repo: "topics", action: "approve" },
+  ts: Date.now(),
 });
 ```
 
-## API entry points
+## API surface
 
-| Import path | Cosa esporta |
-|---|---|
-| `agent-conductor` | API pubblica completa (re-exports da sub-paths) |
-| `agent-conductor/jsonl` | Parser JSONL transcript (last-N turn extraction, tool_use pending detection, stop_reason) |
-| `agent-conductor/sessions` | `refinedStatus`, `lock`, `suggest`, `snapshot` (logica osservativa pura) |
-| `agent-conductor/tmux` | `findPaneForPid`, `getTmuxPanesOnce`, `sendKeys`, `appendAudit` |
-| `agent-conductor/reminders` | `listTodos`, `addTodo`, `completeTodo`, `pollTodos`, `parseMetadata`/`formatMetadata` |
+| Import | Exposes |
+|--------|---------|
+| `agent-conductor` | Full barrel (most common) |
+| `agent-conductor/jsonl` | Transcript parser — `readJsonlTailLines`, `extractLastAssistantTurn`, `extractPendingToolUses`, `getStopReason`, `extractToolUseEvents`, `sumTokens`, `countTurns` |
+| `agent-conductor/sessions` | Observer + composer — `refinedStatusFor`, `findGitRoot`, `detectConflict`, `suggestNext`, `composeSnapshot`, `buildSnapshot`, `buildTranscript` |
+| `agent-conductor/tmux` | Write controls — `listAllPanes`, `findPaneForPid`, `sendKeys`, `capturePane`, `appendAudit` |
+| `agent-conductor/reminders` | Intent layer — `getActiveCli`, `probeAuth`, `listTodos`, `addTodo`, `completeTodo`, `parseTodoMetadata`, `formatTodoMetadata`, `diffTodos`, `startReminderPolling`, `stopReminderPolling` |
+
+Full types are exported via the barrel: `RefinedStatus`, `Confidence`, `Suggestion`, `AuditEntry`, `SnapshotEntry`, `OrchestratorSnapshot`, `ReminderTodo`, `TodoMetadata`, `TodoPhase`, `TodoEvent`, `LocalSession`, `LocalSessionStatus`.
 
 ## Design principles
 
-1. **No fs writes outside opt-in paths**: audit log scrive solo a `~/.claude/jarvis/orchestrator/audit.jsonl` (override-able), niente magia
-2. **No LLM calls**: la suggestion engine è una lookup-table deterministica; nessun token speso
-3. **Pure functions where possible**: `composeSnapshot(sessions, statusMap, lastByPid, conflictMap)` è sync+pure e unit-testabile
-4. **Graceful degradation**: se `remindctl` manca o non è autorizzato → API ritorna `{authorized: false, banner}` invece di crashare; fallback `~/.claude/jarvis/todos.json` locale
-5. **execFile arg-array everywhere**: nessuna shell string per tmux/CLI (security + portability)
+1. **Library doesn't own its data source.** `buildSnapshot(sessions)` accepts sessions; you bring discovery
+2. **No LLM calls in the suggestion engine.** Pure lookup table. Predictable, free, idempotent
+3. **Pure functions where possible.** `composeSnapshot()` is sync + pure — trivially unit-testable without tmpdirs or env mocks
+4. **Graceful degradation.** `remindctl` missing or unauthorized → API returns `{authorized: false, banner: "…"}`. Never throws. Local `~/.config/agent-conductor/todos.json` fallback planned for v0.2
+5. **`execFile` arg-array everywhere.** No shell strings for tmux/CLI invocations (security + cross-platform sanity)
+6. **Worktree-aware.** `lock.ts` walks `.git` roots before comparing paths, so sibling worktrees of the same repo don't false-positive as a conflict
 
-## Stato
+## Roadmap
 
-- v0.1.0 (2026-05-10): estrazione iniziale da Jarvis Phase 2. ~127 test GREEN, dual ESM/CJS build via tsup, TypeScript 5.7 strict mode.
-- v0.2 (planned): provider adapters (Aider, Cursor CLI), local-file fallback Reminders, optional HTTP server bundled.
+### v0.2 — Public release (current)
+
+- [x] MIT license, public repo
+- [x] English docs + logo
+- [x] Sanitized fixtures (no PII)
+
+### v0.3 — Provider adapters
+
+- [ ] Aider CLI adapter (parse `.aider.chat.history.md`)
+- [ ] Cursor CLI adapter
+- [ ] ChatGPT CLI adapter (`shell-gpt`, `chatblade`)
+- [ ] Generic `SessionProvider` interface so users can wire their own
+
+### v0.4 — Cross-platform intent layer
+
+- [ ] Local-file fallback (`~/.config/agent-conductor/todos.json`) with watch-mode
+- [ ] Linux: `gnome-todo` / `evolution-data-server` adapter
+- [ ] Windows: Microsoft To Do adapter (Graph API, optional)
+
+### v0.5 — Bundled HTTP server
+
+- [ ] Optional Fastify or Hono server that exposes the API over HTTP, so non-Node clients (Swift, Rust, Python apps) can consume the snapshot without re-implementing the integration
+- [ ] WebSocket event stream (`sessions:update`, `todos:update`)
+
+### Maybe-someday
+
+- [ ] Multi-machine snapshot federation (SSH + local cache)
+- [ ] Slack / Discord push when a session enters `awaiting_user_input`
+- [ ] Things 3 / Todoist / Notion adapters (Reminders alternatives)
+- [ ] Auto-pilot mode behind a budget cap (`confidence: high` only)
+
+Contributions or proposals on any of the above are welcome via issues or PRs.
+
+## Requirements
+
+- Node.js ≥ 20
+- macOS (for tmux + Apple Reminders integration). The JSONL parser, suggestion engine, and lock detector work on any platform; tmux/Reminders are macOS-specific for v0.2
+- `tmux` ≥ 3.0 (for write-side controls)
+- `remindctl` ≥ 0.1 from `steipete/tap` (or `apple-reminders-cli` / `ekctl` as fallback with reduced features)
+
+```bash
+brew install tmux
+brew install steipete/tap/remindctl
+```
+
+## Development
+
+```bash
+npm install
+npm test           # node:test, 68 specs
+npm run typecheck
+npm run build      # tsup ESM+CJS dual + .d.ts
+```
+
+Test framework: `node:test` + `node:assert/strict` (zero test dependencies).
+Build: `tsup` (ESM + CJS + `.d.ts` per subpath).
+TypeScript: 5.7 strict mode.
+
+## Privacy & data
+
+- All fixtures in this repo are synthetic. The Reminders sample data uses dummy UUIDs and the generic list name `AgentTasks`
+- The `audit.jsonl` log writes to `~/.claude/jarvis/orchestrator/audit.jsonl` by default. Override via the `AGENT_CONDUCTOR_AUDIT_DIR` environment variable
+- No telemetry. No network calls (other than your own consumer code)
+
+## Contributing
+
+Bug reports, feature requests, and pull requests are welcome at [github.com/zorahrel/agent-conductor/issues](https://github.com/zorahrel/agent-conductor/issues).
 
 ## License
 
-UNLICENSED (private). Per ora distribuito solo a consumers interni (Jarvis, Topics App).
-
-## Source projects
-
-- `jarvis-claudecode/router/` — primo consumer, espone endpoint HTTP `/api/sessions/...`, `/api/todos`, `/api/sessions/:pid/inject`
-- `topics-app/` (TBD) — secondo consumer, integra orchestrator nei suoi project tabs
+[MIT](./LICENSE)

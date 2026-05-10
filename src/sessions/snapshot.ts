@@ -97,7 +97,7 @@ export async function buildTranscript(
  *     including a `tmuxByPid` map. Easy to unit-test without tmpdirs or
  *     env mocking.
  *  2. `buildSnapshot` (ASYNC) — accepts `sessions` from caller (library
- *     consumers provide their own discovery mechanism — Jarvis uses ps+lsof,
+ *     consumers provide their own discovery mechanism — consumers like Jarvis use ps+lsof,
  *     Topics uses its own session registry) then fetches refinedStatusFor +
  *     extractLastAssistantTurn + detectConflict + getTmuxPanesOnce +
  *     findPaneForPid for parent-walking, then delegates to composeSnapshot.

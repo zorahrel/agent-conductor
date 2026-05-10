@@ -42,7 +42,7 @@ function normalizeRemindCtl(raw) {
 }
 var execFileDefault = promisify(execFile);
 var FALLBACK_FILE = join(homedir(), ".claude", "jarvis", "todos.json");
-var ACTIVE_LIST = "Jarvis/ActiveTasks";
+var ACTIVE_LIST = "AgentTasks";
 async function getActiveCli(execFn = execFileDefault) {
   const candidates = [
     { bin: "remindctl", cli: "remindctl" },

@@ -41,7 +41,7 @@ export interface TodoMetadata {
 export interface ReminderTodo {
   id: string;            // UUID from EventKit (e.g. "AAAA0001-2222-44A4-84A8-58A9D976D920")
   title: string;
-  list: string;          // List title (e.g. "Jarvis/ActiveTasks")
+  list: string;          // List title (e.g. "AgentTasks")
   notes: string | null;
   due: string | null;    // ISO 8601 string or null
   priority: number;      // 0=none, 1=low, 5=medium, 9=high (per EventKit convention)

@@ -34,7 +34,7 @@ test("formatTodoMetadata: produces canonical 'pid:N repo:R phase:P' line", () =>
 
 test("Round-trip: parseTodoMetadata(formatTodoMetadata(m)) === m", () => {
   const cases = [
-    { pid: 1, repo: "jarvis", phase: "plan" as const },
+    { pid: 1, repo: "demo-app", phase: "plan" as const },
     { pid: 999999, repo: "topics", phase: "exec" as const },
     { pid: 42, repo: "armonia", phase: "review" as const },
   ];

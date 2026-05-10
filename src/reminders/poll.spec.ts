@@ -15,7 +15,7 @@ function mkTodo(over: Partial<ReminderTodo> = {}): ReminderTodo {
   return {
     id: "AAA",
     title: "todo",
-    list: "Jarvis/ActiveTasks",
+    list: "AgentTasks",
     notes: null,
     due: null,
     priority: 0,

@@ -50,7 +50,7 @@ export function diffTodos(prev: ReminderTodo[], next: ReminderTodo[]): TodoEvent
 // ── Module-private polling state ────────────────────────────────────────
 //
 // Single global state because we only ever poll one list at a time
-// (Jarvis/ActiveTasks). If we ever need multi-list polling, refactor this
+// (AgentTasks). If we ever need multi-list polling, refactor this
 // to a Map<listName, PollState>.
 let pollHandle: ReturnType<typeof setInterval> | null = null;
 let prevState: ReminderTodo[] = [];
@@ -86,7 +86,7 @@ export function startReminderPolling(opts: PollOptions): void {
         }
       }
     } catch (err) {
-      // First-run: Jarvis/ActiveTasks list doesn't exist yet. Swallow
+      // First-run: target list doesn't exist yet. Swallow
       // silently — the user creates it via their iPhone/Mac Reminders app
       // (the dashboard's `listMissing` banner explains the path). Logging
       // a WARN every 3s would spam the router log indefinitely.

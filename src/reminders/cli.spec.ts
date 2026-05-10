@@ -41,18 +41,18 @@ function makeExecStub(behaviors: Array<(call: ExecCall) => { stdout: string; std
 test("listTodos: returns parsed array from sample-show-active.json fixture (live remindctl 0.1.1 shape)", async () => {
   const fixture = await readFile(join(FIXTURES, "sample-show-active.json"), "utf8");
   const stub = makeExecStub([() => ({ stdout: fixture })]);
-  const todos = await listTodos("Jarvis/ActiveTasks", "remindctl", stub.fn);
+  const todos = await listTodos("AgentTasks", "remindctl", stub.fn);
   assert.equal(todos.length, 3);
   assert.equal(todos[0].title, "Plan 02-01 — refinedStatus");
   // Normalizer: live remindctl emits `listName` + `isCompleted` + string priority;
   // we must surface them as `list` + `completed` + numeric priority so the
   // documented ReminderTodo contract holds.
-  assert.equal(todos[0].list, "Jarvis/ActiveTasks");
+  assert.equal(todos[0].list, "AgentTasks");
   assert.equal(todos[0].completed, false);
   assert.equal(todos[0].priority, 0); // "none" → 0
   // Metadata parsed alongside raw notes
   assert.equal(todos[0].metadata.pid, 12345);
-  assert.equal(todos[0].metadata.repo, "jarvis");
+  assert.equal(todos[0].metadata.repo, "demo-app");
   assert.equal(todos[0].metadata.phase, "plan");
   // Second todo has prose + metadata
   assert.equal(todos[1].metadata.pid, 67890);
@@ -60,7 +60,7 @@ test("listTodos: returns parsed array from sample-show-active.json fixture (live
   // Third todo has no metadata
   assert.deepEqual(todos[2].metadata, {});
   // Verify the call args
-  assert.deepEqual(stub.calls[0].args, ["show", "all", "--list", "Jarvis/ActiveTasks", "--json"]);
+  assert.deepEqual(stub.calls[0].args, ["show", "all", "--list", "AgentTasks", "--json"]);
 });
 
 test("listTodos: normalizer maps priority strings (none/low/medium/high) to 0/1/5/9", async () => {
@@ -79,11 +79,11 @@ test("listTodos: normalizer maps priority strings (none/low/medium/high) to 0/1/
 });
 
 test("addTodo: builds correct execFile args including metadata appended to notes", async () => {
-  const created = { id: "NEW-1", title: "x", list: "Jarvis/ActiveTasks", due: null, notes: "pid:1 repo:r phase:plan", priority: 0, completed: false };
+  const created = { id: "NEW-1", title: "x", list: "AgentTasks", due: null, notes: "pid:1 repo:r phase:plan", priority: 0, completed: false };
   const stub = makeExecStub([() => ({ stdout: JSON.stringify(created) })]);
   const result = await addTodo(
     { title: "x", metadata: { pid: 1, repo: "r", phase: "plan" } },
-    "Jarvis/ActiveTasks",
+    "AgentTasks",
     "remindctl",
     stub.fn,
   );
@@ -94,7 +94,7 @@ test("addTodo: builds correct execFile args including metadata appended to notes
   assert.equal(args[0], "add");
   assert.equal(args[1], "x");
   assert.equal(args[2], "--list");
-  assert.equal(args[3], "Jarvis/ActiveTasks");
+  assert.equal(args[3], "AgentTasks");
   // Notes flag carries the formatted metadata
   const notesIdx = args.indexOf("--notes");
   assert.ok(notesIdx > 0);

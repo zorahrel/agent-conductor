@@ -84,7 +84,7 @@ const execFileDefault = promisify(execFileCb);
 export type ExecFn = (cmd: string, args: string[]) => Promise<{ stdout: string; stderr: string }>;
 
 const FALLBACK_FILE = join(homedir(), ".claude", "jarvis", "todos.json");
-const ACTIVE_LIST = "Jarvis/ActiveTasks";
+const ACTIVE_LIST = "AgentTasks";
 
 /**
  * Probe each CLI in priority order; return the first that responds to
