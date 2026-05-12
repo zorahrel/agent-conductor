@@ -25,6 +25,7 @@ export default defineConfig({
     "discovery/index": "src/discovery/index.ts",
     "providers/index": "src/providers/index.ts",
     "mcp/index": "src/mcp/index.ts",
+    "http/index": "src/http/index.ts",
     "cli/bin": "src/cli/bin.ts",
   },
   format: ["esm", "cjs"],

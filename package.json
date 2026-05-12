@@ -49,6 +49,11 @@
       "types": "./dist/mcp/index.d.ts",
       "import": "./dist/mcp/index.js",
       "require": "./dist/mcp/index.cjs"
+    },
+    "./http": {
+      "types": "./dist/http/index.d.ts",
+      "import": "./dist/http/index.js",
+      "require": "./dist/http/index.cjs"
     }
   },
   "files": [
@@ -90,6 +95,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.10.5",
+    "@types/ws": "^8.18.1",
     "tsup": "^8.3.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.3"
@@ -101,5 +107,8 @@
   "bugs": {
     "url": "https://github.com/zorahrel/agent-conductor/issues"
   },
-  "homepage": "https://github.com/zorahrel/agent-conductor#readme"
+  "homepage": "https://github.com/zorahrel/agent-conductor#readme",
+  "dependencies": {
+    "ws": "^8.20.0"
+  }
 }
