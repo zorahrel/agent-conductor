@@ -4,6 +4,7 @@ import { join, basename, sep, dirname } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
+import { createInterface } from 'readline';
 
 // src/cli/args.ts
 function parseArgs(argv) {
@@ -1646,8 +1647,513 @@ function runInfo(args) {
   return 0;
 }
 
+// src/mcp/protocol.ts
+var MCP_PROTOCOL_VERSION = "2024-11-05";
+var MCP_SERVER_NAME = "agent-conductor";
+var JsonRpcErrorCode = {
+  ParseError: -32700,
+  InvalidRequest: -32600,
+  MethodNotFound: -32601,
+  InvalidParams: -32602,
+  InternalError: -32603
+};
+function jsonRpcSuccess(id, result) {
+  return { jsonrpc: "2.0", id, result };
+}
+function jsonRpcError(id, code, message, data) {
+  const error = { code, message };
+  return { jsonrpc: "2.0", id, error };
+}
+function toolCallError(id, message) {
+  return jsonRpcSuccess(id, {
+    isError: true,
+    content: [{ type: "text", text: message }]
+  });
+}
+function toolCallSuccess(id, payload) {
+  const text = typeof payload === "string" ? payload : JSON.stringify(payload, null, 2);
+  return jsonRpcSuccess(id, {
+    content: [{ type: "text", text }]
+  });
+}
+var stringArg = (args, key) => {
+  const v = args[key];
+  return typeof v === "string" ? v : void 0;
+};
+var numberArg = (args, key) => {
+  const v = args[key];
+  return typeof v === "number" && Number.isFinite(v) ? v : void 0;
+};
+var boolArg = (args, key) => {
+  const v = args[key];
+  return typeof v === "boolean" ? v : void 0;
+};
+var snapshotTool = {
+  descriptor: {
+    name: "snapshot",
+    description: "Build an OrchestratorSnapshot for every live AI coding session: pid, repo, branch, refinedStatus, last assistant summary, deterministic suggestion + action, tmux pane mapping, cwd-collision conflict marker.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          description: "Provider name (claude-code | aider | cursor-cli). Default: claude-code. Use --all-providers semantics by passing 'all'."
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const providerName = stringArg(args, "provider") ?? DEFAULT_PROVIDER_NAME;
+    let sessions;
+    if (providerName === "all") {
+      const merged = await Promise.all(
+        allProviders().map(async (p) => {
+          try {
+            return await p.discover();
+          } catch {
+            return [];
+          }
+        })
+      );
+      sessions = merged.flat();
+    } else {
+      const p = getProvider(providerName);
+      if (!p) {
+        throw new Error(
+          `unknown provider '${providerName}'. Available: ${allProviders().map((x) => x.name).join(", ")}`
+        );
+      }
+      sessions = await p.discover();
+    }
+    return await buildSnapshot(sessions);
+  }
+};
+var sessionsTool = {
+  descriptor: {
+    name: "sessions",
+    description: "Discover live AI coding sessions (cheaper than snapshot \u2014 no transcript tail, no suggestion, no tmux lookup).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        provider: {
+          type: "string",
+          description: "Provider name. Default: claude-code. Use 'all' for every provider."
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const providerName = stringArg(args, "provider") ?? DEFAULT_PROVIDER_NAME;
+    if (providerName === "all") {
+      const merged = await Promise.all(
+        allProviders().map(async (p2) => {
+          try {
+            return await p2.discover();
+          } catch {
+            return [];
+          }
+        })
+      );
+      return merged.flat();
+    }
+    const p = getProvider(providerName);
+    if (!p) {
+      throw new Error(
+        `unknown provider '${providerName}'. Available: ${allProviders().map((x) => x.name).join(", ")}`
+      );
+    }
+    return await p.discover();
+  }
+};
+var transcriptTool = {
+  descriptor: {
+    name: "transcript",
+    description: "Read the last N turns from a JSONL transcript at the given path (tails the last few KB rather than reading the whole file).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: {
+          type: "string",
+          description: "Absolute path to the .jsonl transcript file."
+        },
+        limit: {
+          type: "number",
+          description: "Number of recent lines to return (default: 5)."
+        }
+      },
+      required: ["path"],
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const path = stringArg(args, "path");
+    if (!path) throw new Error("missing required arg: path");
+    const limit = numberArg(args, "limit") ?? 5;
+    const lines = await readJsonlTailLines(path, limit);
+    const lastAssistant = await extractLastAssistantTurn(path);
+    return { path, limit, lines, lastAssistant };
+  }
+};
+var todosListTool = {
+  descriptor: {
+    name: "todos_list",
+    description: "List todos from the Apple Reminders intent layer. macOS only; returns {authorized:false} on other platforms or when remindctl is missing.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        list: {
+          type: "string",
+          description: "Reminders list name (default: AgentTasks)."
+        }
+      },
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const list = stringArg(args, "list") ?? "AgentTasks";
+    return await listTodos(list);
+  }
+};
+var todosAddTool = {
+  descriptor: {
+    name: "todos_add",
+    description: "Create a new todo in the Apple Reminders intent layer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        title: { type: "string", description: "Todo title." },
+        body: {
+          type: "string",
+          description: "Optional body. Use 'pid:NNNN repo:foo phase:plan' metadata format."
+        },
+        list: { type: "string", description: "List name (default: AgentTasks)." }
+      },
+      required: ["title"],
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const title = stringArg(args, "title");
+    if (!title) throw new Error("missing required arg: title");
+    const body = stringArg(args, "body");
+    const list = stringArg(args, "list") ?? "AgentTasks";
+    return await addTodo({ title, notes: body }, list);
+  }
+};
+var todosCompleteTool = {
+  descriptor: {
+    name: "todos_complete",
+    description: "Mark a todo completed in the Apple Reminders intent layer.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        id: {
+          type: "string",
+          description: "Reminder ID \u2014 full UUID or a unique prefix (remindctl resolves prefixes)."
+        }
+      },
+      required: ["id"],
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const id = stringArg(args, "id");
+    if (!id) throw new Error("missing required arg: id");
+    return await completeTodo(id);
+  }
+};
+var injectTool = {
+  descriptor: {
+    name: "inject",
+    description: "Send keystrokes to the tmux pane owning the given pid (with audit log). REQUIRES `approve: true` in arguments \u2014 mirrors the auto-pilot 'confidence === high' gate. Cwd-collision lock is enforced unless `force: true`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pid: { type: "number", description: "Target process pid." },
+        text: { type: "string", description: "Keystrokes to send (newline appended by sendKeys)." },
+        approve: {
+          type: "boolean",
+          description: "Must be `true`. Explicit safety gate so MCP clients cannot inject without intent."
+        },
+        force: {
+          type: "boolean",
+          description: "Bypass the cwd-collision lock. Default false."
+        },
+        dryRun: {
+          type: "boolean",
+          description: "Audit-only, do not actually call tmux send-keys."
+        },
+        source: {
+          type: "string",
+          description: "Audit log `source` tag. Constrained to 'user-approved' | 'auto' | 'skill'; anything else (or omitted) is normalised to 'skill' since MCP callers are typically other agents invoking on the user's behalf."
+        }
+      },
+      required: ["pid", "text", "approve"],
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const pid = numberArg(args, "pid");
+    const text = stringArg(args, "text");
+    const approve = boolArg(args, "approve");
+    if (pid === void 0) throw new Error("missing required arg: pid (number)");
+    if (text === void 0) throw new Error("missing required arg: text (string)");
+    if (approve !== true) {
+      throw new Error("missing required arg: approve === true (explicit safety gate)");
+    }
+    const force = boolArg(args, "force") ?? false;
+    const dryRun = boolArg(args, "dryRun") ?? false;
+    const sourceRaw = stringArg(args, "source");
+    const source = sourceRaw === "user-approved" || sourceRaw === "auto" ? sourceRaw : "skill";
+    const pane = await findPaneForPid(pid);
+    if (!pane) {
+      throw new Error(`precondition: pid ${pid} is not running under tmux (bare TTY sessions are read-only)`);
+    }
+    const sessions = await claudeCodeProvider2.discover();
+    const me = sessions.find((s) => s.pid === pid);
+    const repoSlug = me?.repoName ?? "unknown";
+    if (!force && me) {
+      for (const other of sessions) {
+        if (other.pid === pid) continue;
+        if (await detectConflict(me.cwd, other.cwd)) {
+          throw new Error(
+            `precondition: cwd_collision with pid ${other.pid} on path ${me.cwd} (use force:true to bypass)`
+          );
+        }
+      }
+    }
+    if (dryRun) {
+      return {
+        ok: true,
+        pid,
+        pane: pane.pane,
+        session: pane.session,
+        repo: repoSlug,
+        dryRun: true
+      };
+    }
+    const ts = Date.now();
+    await sendKeys(pane.pane, text);
+    await appendAudit({ pid, repo: repoSlug, action: "inject", text, source, ts });
+    return {
+      ok: true,
+      pid,
+      pane: pane.pane,
+      session: pane.session,
+      repo: repoSlug,
+      dryRun: false,
+      audit: { ts, pid, repo: repoSlug, action: "inject", text, source }
+    };
+  }
+};
+var auditTailTool = {
+  descriptor: {
+    name: "audit_tail",
+    description: "Return the last N entries from the inject audit log.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        tail: { type: "number", description: "Number of entries (default: 20)." }
+      },
+      additionalProperties: false
+    }
+  },
+  handler: async (args) => {
+    const tail = numberArg(args, "tail") ?? 20;
+    let raw;
+    try {
+      raw = await promises.readFile(AUDIT_FILE_PATH, "utf8");
+    } catch (err) {
+      if (err.code === "ENOENT") {
+        return { path: AUDIT_FILE_PATH, total: 0, entries: [] };
+      }
+      throw err;
+    }
+    const entries = [];
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      try {
+        entries.push(JSON.parse(line));
+      } catch {
+      }
+    }
+    const slice = entries.slice(-tail);
+    return { path: AUDIT_FILE_PATH, total: entries.length, entries: slice };
+  }
+};
+var MCP_TOOLS = [
+  snapshotTool,
+  sessionsTool,
+  transcriptTool,
+  todosListTool,
+  todosAddTool,
+  todosCompleteTool,
+  injectTool,
+  auditTailTool
+];
+function findTool(name) {
+  return MCP_TOOLS.find((t) => t.descriptor.name === name);
+}
+function allToolDescriptors() {
+  return MCP_TOOLS.map((t) => t.descriptor);
+}
+
+// src/mcp/server.ts
+function serverVersion() {
+  return "0.4.0";
+}
+async function dispatch(req) {
+  if (req.jsonrpc !== "2.0" || typeof req.method !== "string") {
+    return jsonRpcError(
+      req.id ?? null,
+      JsonRpcErrorCode.InvalidRequest,
+      "invalid JSON-RPC envelope"
+    );
+  }
+  const id = req.id ?? null;
+  const isNotification = req.id === void 0;
+  switch (req.method) {
+    case "initialize": {
+      req.params ?? {};
+      const result = {
+        protocolVersion: MCP_PROTOCOL_VERSION,
+        capabilities: { tools: {} },
+        serverInfo: { name: MCP_SERVER_NAME, version: serverVersion() }
+      };
+      return isNotification ? null : jsonRpcSuccess(id, result);
+    }
+    case "notifications/initialized":
+    case "initialized":
+      return null;
+    case "ping":
+      return isNotification ? null : jsonRpcSuccess(id, {});
+    case "tools/list": {
+      const result = { tools: allToolDescriptors() };
+      return jsonRpcSuccess(id, result);
+    }
+    case "tools/call": {
+      const params = req.params;
+      if (!params || typeof params.name !== "string") {
+        return jsonRpcError(
+          id,
+          JsonRpcErrorCode.InvalidParams,
+          "tools/call requires { name: string, arguments?: object }"
+        );
+      }
+      const tool = findTool(params.name);
+      if (!tool) {
+        return jsonRpcError(
+          id,
+          JsonRpcErrorCode.MethodNotFound,
+          `unknown tool '${params.name}'`
+        );
+      }
+      try {
+        const payload = await tool.handler(params.arguments ?? {});
+        return toolCallSuccess(id, payload);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return toolCallError(id, msg);
+      }
+    }
+    default:
+      return jsonRpcError(
+        id,
+        JsonRpcErrorCode.MethodNotFound,
+        `unknown method '${req.method}'`
+      );
+  }
+}
+function runStdioServer(opts = {}) {
+  const stdin = opts.stdin ?? process.stdin;
+  const stdout = opts.stdout ?? process.stdout;
+  const stderr = opts.stderr ?? process.stderr;
+  const rl = createInterface({
+    input: stdin,
+    crlfDelay: Infinity,
+    terminal: false
+  });
+  const writeLine = (obj) => {
+    stdout.write(JSON.stringify(obj) + "\n");
+  };
+  return new Promise((resolve) => {
+    rl.on("line", (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      let req;
+      try {
+        req = JSON.parse(trimmed);
+      } catch (err) {
+        writeLine(
+          jsonRpcError(
+            null,
+            JsonRpcErrorCode.ParseError,
+            `parse error: ${err.message}`
+          )
+        );
+        return;
+      }
+      void (async () => {
+        try {
+          const res = await dispatch(req);
+          if (res !== null) writeLine(res);
+        } catch (err) {
+          stderr.write(
+            `agent-conductor mcp: dispatch crash: ${err.stack ?? String(err)}
+`
+          );
+          writeLine(
+            jsonRpcError(
+              req.id ?? null,
+              JsonRpcErrorCode.InternalError,
+              `internal error: ${err.message}`
+            )
+          );
+        }
+      })();
+    });
+    rl.on("close", () => resolve());
+  });
+}
+
+// src/cli/commands/mcp.ts
+var HELP9 = `Usage: agent-conductor mcp
+
+Start the MCP stdio server. Reads JSON-RPC 2.0 messages on stdin, writes
+responses on stdout. Exits 0 when stdin closes.
+
+This is the side-car / observability surface intended to be consumed by
+MCP clients (Claude Code, Codex, Tessera, custom dashboards) so they can
+see and pilot AI coding sessions the client did not spawn itself.
+
+Flags:
+  -h, --help          Show this help
+
+Examples:
+  # As a server in an MCP client config (claude desktop, etc.):
+  # {
+  #   "mcpServers": {
+  #     "agent-conductor": { "command": "agent-conductor", "args": ["mcp"] }
+  #   }
+  # }
+
+  # Quick stdio handshake test:
+  printf '%s\\n' '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \\
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' | agent-conductor mcp
+`;
+async function mcpCmd(args) {
+  if (flagBool(args, "h", "help")) {
+    process.stdout.write(HELP9);
+    return 0;
+  }
+  await runStdioServer();
+  return 0;
+}
+
 // src/cli/index.ts
-var HELP9 = `agent-conductor \u2014 pilot N concurrent AI coding agent CLI sessions from one place.
+var HELP10 = `agent-conductor \u2014 pilot N concurrent AI coding agent CLI sessions from one place.
 
 Usage:
   agent-conductor <command> [flags]
@@ -1661,6 +2167,7 @@ Commands:
   inject                Send keystrokes to a session's tmux pane (with audit)
   audit                 Show recent audit log entries
   providers <list|info> Inspect the multi-provider registry (Claude, Aider, \u2026)
+  mcp                   Start the MCP stdio server (v0.5 spike \u2014 docs/v0.5-spec.md)
 
 Common flags:
   -h, --help            Show this help
@@ -1682,7 +2189,7 @@ Docs: https://github.com/zorahrel/agent-conductor
 async function run(argv) {
   const args = parseArgs(argv);
   if (flagBool(args, "h", "help") && args._.length === 0) {
-    process.stdout.write(HELP9);
+    process.stdout.write(HELP10);
     return 0;
   }
   if (flagBool(args, "v", "version")) {
@@ -1693,7 +2200,7 @@ async function run(argv) {
   }
   const [sub, ...subPositionals] = args._;
   if (!sub) {
-    process.stdout.write(HELP9);
+    process.stdout.write(HELP10);
     return 0;
   }
   const restArgs = { _: subPositionals, flags: args.flags };
@@ -1715,14 +2222,16 @@ async function run(argv) {
         return await auditCmd(restArgs);
       case "providers":
         return await providersCmd(restArgs);
+      case "mcp":
+        return await mcpCmd(restArgs);
       case "help":
-        process.stdout.write(HELP9);
+        process.stdout.write(HELP10);
         return 0;
       default:
         process.stderr.write(`agent-conductor: unknown command '${sub}'
 
 `);
-        process.stderr.write(HELP9);
+        process.stderr.write(HELP10);
         return 2;
     }
   } catch (err) {

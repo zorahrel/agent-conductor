@@ -31,6 +31,7 @@ import { tmuxCmd } from "./commands/tmux.js";
 import { injectCmd } from "./commands/inject.js";
 import { auditCmd } from "./commands/audit.js";
 import { providersCmd } from "./commands/providers.js";
+import { mcpCmd } from "./commands/mcp.js";
 
 const HELP = `agent-conductor — pilot N concurrent AI coding agent CLI sessions from one place.
 
@@ -46,6 +47,7 @@ Commands:
   inject                Send keystrokes to a session's tmux pane (with audit)
   audit                 Show recent audit log entries
   providers <list|info> Inspect the multi-provider registry (Claude, Aider, …)
+  mcp                   Start the MCP stdio server (v0.5 spike — docs/v0.5-spec.md)
 
 Common flags:
   -h, --help            Show this help
@@ -110,6 +112,8 @@ export async function run(argv: string[]): Promise<number> {
         return await auditCmd(restArgs);
       case "providers":
         return await providersCmd(restArgs);
+      case "mcp":
+        return await mcpCmd(restArgs);
       case "help":
         process.stdout.write(HELP);
         return 0;
