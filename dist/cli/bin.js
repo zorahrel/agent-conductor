@@ -5,6 +5,8 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
+import { createServer } from 'http';
+import { WebSocketServer } from 'ws';
 
 // src/cli/args.ts
 function parseArgs(argv) {
@@ -1676,6 +1678,62 @@ function toolCallSuccess(id, payload) {
     content: [{ type: "text", text }]
   });
 }
+
+// src/reminders/poll.ts
+function diffTodos(prev, next) {
+  const events = [];
+  const prevMap = new Map(prev.map((t) => [t.id, t]));
+  for (const t of next) {
+    const before = prevMap.get(t.id);
+    if (!before) {
+      events.push({ type: "todo:added", todo: t });
+      continue;
+    }
+    if (!before.completed && t.completed) {
+      events.push({ type: "todo:completed", todo: t });
+      continue;
+    }
+    if (before.title !== t.title || before.notes !== t.notes || before.due !== t.due) {
+      events.push({ type: "todo:updated", todo: t, previous: before });
+    }
+  }
+  return events;
+}
+var pollHandle = null;
+var prevState = [];
+function startReminderPolling(opts) {
+  if (pollHandle) return;
+  const interval = opts.intervalMs ?? 3e3;
+  const tick = async () => {
+    try {
+      const next = await listTodos(opts.list);
+      const events = diffTodos(prevState, next);
+      prevState = next;
+      for (const e of events) {
+        try {
+          opts.onEvent(e);
+        } catch (err) {
+          opts.onError?.(err);
+        }
+      }
+    } catch (err) {
+      const msg = String(err.message ?? err);
+      if (/list not found/i.test(msg) || /no such list/i.test(msg)) return;
+      opts.onError?.(err);
+    }
+  };
+  pollHandle = setInterval(tick, interval);
+  void tick();
+}
+function stopReminderPolling() {
+  if (pollHandle) {
+    clearInterval(pollHandle);
+    pollHandle = null;
+  }
+  prevState = [];
+}
+
+// src/mcp/tools.ts
 var stringArg = (args, key) => {
   const v = args[key];
   return typeof v === "string" ? v : void 0;
@@ -2151,9 +2209,432 @@ async function mcpCmd(args) {
   await runStdioServer();
   return 0;
 }
+var DEFAULT_PORT = 32140;
+var PORT_SCAN_MAX = 32199;
+function serverVersion2() {
+  return "0.4.0";
+}
+function sendJson(res, status, body) {
+  const text = JSON.stringify(body);
+  res.writeHead(status, {
+    "Content-Type": "application/json; charset=utf-8",
+    "Content-Length": Buffer.byteLength(text).toString(),
+    "Cache-Control": "no-store"
+  });
+  res.end(text);
+}
+function isLoopbackHost(host) {
+  if (!host) return false;
+  let h = host;
+  if (h.startsWith("[")) {
+    const end = h.indexOf("]");
+    if (end < 0) return false;
+    h = h.slice(1, end);
+  } else {
+    const colon = h.lastIndexOf(":");
+    if (colon > 0) h = h.slice(0, colon);
+  }
+  return h === "127.0.0.1" || h === "localhost" || h === "::1";
+}
+function parseQuery(rawUrl) {
+  const url = new URL(rawUrl, "http://127.0.0.1");
+  const out = {};
+  for (const [k, v] of url.searchParams.entries()) out[k] = v;
+  return out;
+}
+async function discoverSessions(providerName) {
+  if (providerName === "all") {
+    const merged = await Promise.all(
+      allProviders().map(async (p2) => {
+        try {
+          return await p2.discover();
+        } catch {
+          return [];
+        }
+      })
+    );
+    return merged.flat();
+  }
+  const p = getProvider(providerName);
+  if (!p) {
+    throw new Error(
+      `unknown provider '${providerName}'. Available: ${allProviders().map((x) => x.name).join(", ")}`
+    );
+  }
+  return await p.discover();
+}
+async function handleSnapshot(query) {
+  const providerName = query.provider ?? DEFAULT_PROVIDER_NAME;
+  const sessions = await discoverSessions(providerName);
+  return await buildSnapshot(sessions);
+}
+async function handleSessions(query) {
+  const providerName = query.provider ?? DEFAULT_PROVIDER_NAME;
+  return await discoverSessions(providerName);
+}
+async function handleAudit(query) {
+  const tail = Number(query.tail ?? "20");
+  const limit = Number.isFinite(tail) && tail > 0 ? Math.floor(tail) : 20;
+  let raw;
+  try {
+    raw = await promises.readFile(AUDIT_FILE_PATH, "utf8");
+  } catch (err) {
+    if (err.code === "ENOENT") {
+      return { path: AUDIT_FILE_PATH, total: 0, entries: [] };
+    }
+    throw err;
+  }
+  const entries = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    try {
+      entries.push(JSON.parse(line));
+    } catch {
+    }
+  }
+  return { path: AUDIT_FILE_PATH, total: entries.length, entries: entries.slice(-limit) };
+}
+function handleHealth() {
+  return {
+    ok: true,
+    name: "agent-conductor",
+    version: serverVersion2(),
+    pid: process.pid,
+    startedAt: new Date(STARTED_AT).toISOString(),
+    uptimeSec: Math.round((Date.now() - STARTED_AT) / 1e3)
+  };
+}
+var STARTED_AT = Date.now();
+async function dispatchHttp(req) {
+  if (req.method !== "GET" && req.method !== "HEAD") {
+    return { status: 405, body: { error: "method_not_allowed", allowed: ["GET"] } };
+  }
+  if (!isLoopbackHost(req.headers.host)) {
+    return {
+      status: 403,
+      body: {
+        error: "non_loopback_host_rejected",
+        host: req.headers.host ?? null,
+        hint: "agent-conductor binds to 127.0.0.1 only. Set Host: 127.0.0.1 or localhost."
+      }
+    };
+  }
+  const rawUrl = req.url ?? "/";
+  const path = rawUrl.split("?")[0] ?? "/";
+  const query = parseQuery(rawUrl);
+  try {
+    switch (path) {
+      case "/":
+      case "/health":
+        return { status: 200, body: handleHealth() };
+      case "/snapshot":
+        return { status: 200, body: await handleSnapshot(query) };
+      case "/sessions":
+        return { status: 200, body: await handleSessions(query) };
+      case "/audit":
+        return { status: 200, body: await handleAudit(query) };
+      default:
+        return {
+          status: 404,
+          body: {
+            error: "not_found",
+            path,
+            routes: ["/health", "/snapshot", "/sessions", "/audit", "/events (WebSocket)"]
+          }
+        };
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return { status: 500, body: { error: "internal_error", message: msg } };
+  }
+}
+function pickPort(start, max) {
+  return new Promise((resolve, reject) => {
+    const tryPort = (p) => {
+      if (p > max) {
+        reject(new Error(`no free port in range ${start}..${max}`));
+        return;
+      }
+      const probe = createServer();
+      probe.unref();
+      probe.once("error", (err) => {
+        if (err.code === "EADDRINUSE") {
+          tryPort(p + 1);
+        } else {
+          reject(err);
+        }
+      });
+      probe.listen({ port: p, host: "127.0.0.1" }, () => {
+        const addr = probe.address();
+        probe.close(() => {
+          resolve(typeof addr === "object" && addr ? addr.port : p);
+        });
+      });
+    };
+    tryPort(start);
+  });
+}
+async function startHttpServer(opts = {}) {
+  const requested = opts.port;
+  const listenPort = requested !== void 0 ? requested : await pickPort(opts.scanFrom ?? DEFAULT_PORT, opts.scanTo ?? PORT_SCAN_MAX);
+  const server = createServer((req, res) => {
+    void (async () => {
+      const { status, body } = await dispatchHttp(req);
+      sendJson(res, status, body);
+    })();
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen({ port: listenPort, host: "127.0.0.1" }, () => resolve());
+  });
+  const addr = server.address();
+  const port = typeof addr === "object" && addr !== null ? addr.port : listenPort;
+  return { server, port, url: `http://127.0.0.1:${port}` };
+}
+var DEFAULT_SESSIONS_POLL_MS = 5e3;
+var WsBroadcaster = class {
+  subscribers = /* @__PURE__ */ new Set();
+  subscribe(fn) {
+    this.subscribers.add(fn);
+    return () => this.subscribers.delete(fn);
+  }
+  size() {
+    return this.subscribers.size;
+  }
+  emit(e) {
+    for (const fn of this.subscribers) {
+      try {
+        fn(e);
+      } catch {
+      }
+    }
+  }
+};
+function serverVersion3() {
+  return "0.4.0";
+}
+function startSessionsDiffPoller(broadcaster, intervalMs = DEFAULT_SESSIONS_POLL_MS) {
+  let stopped = false;
+  let prev = /* @__PURE__ */ new Map();
+  const tick = async () => {
+    if (stopped) return;
+    try {
+      const merged = await Promise.all(
+        allProviders().map(async (p) => {
+          try {
+            return await p.discover();
+          } catch {
+            return [];
+          }
+        })
+      );
+      const sessions = merged.flat();
+      const next = await refinedStatusFor(sessions);
+      for (const [pid, status] of next.entries()) {
+        const previous = prev.get(pid) ?? null;
+        if (previous !== status) {
+          broadcaster.emit({
+            type: "sessions:update",
+            payload: { pid, refinedStatus: status, previous }
+          });
+        }
+      }
+      prev = next;
+    } catch {
+    }
+  };
+  void tick();
+  const handle = setInterval(() => void tick(), intervalMs);
+  handle.unref();
+  return () => {
+    stopped = true;
+    clearInterval(handle);
+  };
+}
+function attachWebSocket(http, opts = {}) {
+  const broadcaster = opts.broadcaster ?? new WsBroadcaster();
+  const wss = new WebSocketServer({ noServer: true });
+  let stopReminders = null;
+  let stopSessions = null;
+  const ensurePollersRunning = () => {
+    if (broadcaster.size() === 0) return;
+    if (!stopReminders) {
+      startReminderPolling({
+        ...opts.reminderPoll ?? {},
+        onEvent: (e) => {
+          broadcaster.emit({ type: e.type, payload: e });
+        }
+      });
+      stopReminders = () => {
+        try {
+          stopReminderPolling();
+        } catch {
+        }
+      };
+    }
+    if (!stopSessions) {
+      stopSessions = startSessionsDiffPoller(
+        broadcaster,
+        opts.sessionsPollMs ?? DEFAULT_SESSIONS_POLL_MS
+      );
+    }
+  };
+  const maybeStopPollers = () => {
+    if (broadcaster.size() > 0) return;
+    if (stopReminders) {
+      stopReminders();
+      stopReminders = null;
+    }
+    if (stopSessions) {
+      stopSessions();
+      stopSessions = null;
+    }
+  };
+  wss.on("connection", (ws) => {
+    const sendJson2 = (e) => {
+      if (ws.readyState === ws.OPEN) {
+        ws.send(JSON.stringify(e));
+      }
+    };
+    sendJson2({
+      type: "hello",
+      payload: {
+        name: "agent-conductor",
+        version: serverVersion3(),
+        serverTime: (/* @__PURE__ */ new Date()).toISOString()
+      }
+    });
+    const unsubscribe = broadcaster.subscribe(sendJson2);
+    ensurePollersRunning();
+    ws.on("close", () => {
+      unsubscribe();
+      maybeStopPollers();
+    });
+    ws.on("error", () => {
+    });
+  });
+  const onUpgrade = (req, socket, head) => {
+    if (!isLoopbackHost(req.headers.host)) {
+      socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    if (!req.url || !req.url.startsWith("/events")) {
+      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
+      socket.destroy();
+      return;
+    }
+    wss.handleUpgrade(req, socket, head, (ws) => {
+      wss.emit("connection", ws, req);
+    });
+  };
+  http.on("upgrade", onUpgrade);
+  const close = async () => {
+    http.off("upgrade", onUpgrade);
+    if (stopReminders) stopReminders();
+    if (stopSessions) stopSessions();
+    stopReminders = null;
+    stopSessions = null;
+    await new Promise((resolve) => {
+      wss.close(() => resolve());
+    });
+  };
+  return { broadcaster, wss, close };
+}
+
+// src/http/index.ts
+async function startDaemon(opts = {}) {
+  const http = await startHttpServer(opts);
+  const ws = attachWebSocket(http.server, opts);
+  let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    await ws.close();
+    await new Promise((resolve) => {
+      http.server.close(() => resolve());
+    });
+  };
+  return { port: http.port, url: http.url, http, ws, close };
+}
+
+// src/cli/commands/serve.ts
+var HELP10 = `Usage: agent-conductor serve [--port N]
+
+Start the HTTP + WebSocket daemon on 127.0.0.1 (loopback only).
+
+Routes:
+  GET  /health        Server info + uptime
+  GET  /snapshot      OrchestratorSnapshot (?provider=claude-code|aider|cursor-cli|all)
+  GET  /sessions      Discovery only (cheaper)
+  GET  /audit         Audit log tail (?tail=20)
+  WS   /events        Live event stream \u2014 hello + todo:* + sessions:update
+
+Flags:
+  --port N            Bind to a specific port (fails if in use).
+                      Default: pick the first free port from 32140 upward.
+  -h, --help          Show this help
+
+Security:
+  The daemon binds 127.0.0.1 only. Any request whose Host: header is not a
+  loopback name (127.0.0.1, localhost, ::1) is rejected with 403. There is
+  no auth layer \u2014 remote access requires a reverse proxy you control.
+
+Examples:
+  agent-conductor serve
+  agent-conductor serve --port 32200
+
+  # Health check from another shell:
+  curl http://127.0.0.1:32140/health
+
+  # Snapshot via curl:
+  curl http://127.0.0.1:32140/snapshot
+
+  # Event stream (websocat / wscat / similar):
+  wscat -c ws://127.0.0.1:32140/events
+`;
+async function serveCmd(args) {
+  if (flagBool(args, "h", "help")) {
+    process.stdout.write(HELP10);
+    return 0;
+  }
+  const port = flagInt(args, "port");
+  const daemon = await startDaemon({ port });
+  process.stdout.write(`agent-conductor: HTTP ${daemon.url}
+`);
+  process.stdout.write(`agent-conductor: WS   ws://127.0.0.1:${daemon.port}/events
+`);
+  process.stdout.write(`agent-conductor: PID  ${process.pid}
+`);
+  process.stdout.write(`agent-conductor: ready (Ctrl+C to stop)
+`);
+  const exitOn = (signal) => {
+    return (async () => {
+      process.stdout.write(`
+agent-conductor: ${signal} received \u2014 draining...
+`);
+      try {
+        await daemon.close();
+        process.stdout.write(`agent-conductor: closed cleanly
+`);
+      } catch (err) {
+        process.stderr.write(
+          `agent-conductor: shutdown error: ${err.message}
+`
+        );
+      }
+      process.exit(0);
+    })();
+  };
+  process.on("SIGINT", () => void exitOn("SIGINT"));
+  process.on("SIGTERM", () => void exitOn("SIGTERM"));
+  await new Promise(() => {
+  });
+  return 0;
+}
 
 // src/cli/index.ts
-var HELP10 = `agent-conductor \u2014 pilot N concurrent AI coding agent CLI sessions from one place.
+var HELP11 = `agent-conductor \u2014 pilot N concurrent AI coding agent CLI sessions from one place.
 
 Usage:
   agent-conductor <command> [flags]
@@ -2167,7 +2648,8 @@ Commands:
   inject                Send keystrokes to a session's tmux pane (with audit)
   audit                 Show recent audit log entries
   providers <list|info> Inspect the multi-provider registry (Claude, Aider, \u2026)
-  mcp                   Start the MCP stdio server (v0.5 spike \u2014 docs/v0.5-spec.md)
+  mcp                   Start the MCP stdio server (v0.5 \u2014 docs/v0.5-spec.md)
+  serve                 Start the HTTP + WebSocket daemon on 127.0.0.1 (v0.5)
 
 Common flags:
   -h, --help            Show this help
@@ -2189,7 +2671,7 @@ Docs: https://github.com/zorahrel/agent-conductor
 async function run(argv) {
   const args = parseArgs(argv);
   if (flagBool(args, "h", "help") && args._.length === 0) {
-    process.stdout.write(HELP10);
+    process.stdout.write(HELP11);
     return 0;
   }
   if (flagBool(args, "v", "version")) {
@@ -2200,7 +2682,7 @@ async function run(argv) {
   }
   const [sub, ...subPositionals] = args._;
   if (!sub) {
-    process.stdout.write(HELP10);
+    process.stdout.write(HELP11);
     return 0;
   }
   const restArgs = { _: subPositionals, flags: args.flags };
@@ -2224,14 +2706,16 @@ async function run(argv) {
         return await providersCmd(restArgs);
       case "mcp":
         return await mcpCmd(restArgs);
+      case "serve":
+        return await serveCmd(restArgs);
       case "help":
-        process.stdout.write(HELP10);
+        process.stdout.write(HELP11);
         return 0;
       default:
         process.stderr.write(`agent-conductor: unknown command '${sub}'
 
 `);
-        process.stderr.write(HELP10);
+        process.stderr.write(HELP11);
         return 2;
     }
   } catch (err) {
