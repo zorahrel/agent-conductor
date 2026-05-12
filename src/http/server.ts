@@ -296,7 +296,26 @@ export interface StartedHttp {
   server: Server;
   port: number;
   url: string;
+  /**
+   * Graceful shutdown — see v0.5 spec AC8.
+   *
+   * 1. Stop accepting new connections (`server.close()`).
+   * 2. Wait for in-flight requests to finish, up to `timeoutMs`.
+   * 3. On timeout, force-close residual connections via
+   *    `server.closeAllConnections()` (Node >= 18.2).
+   *
+   * Resolves with `{drained: true, inflightAtStart, inflightAtEnd}` once
+   * the server is fully closed. Idempotent.
+   */
+  gracefulClose: (timeoutMs?: number) => Promise<{
+    drained: boolean;
+    inflightAtStart: number;
+    inflightAtEnd: number;
+  }>;
 }
+
+/** Default drain budget for graceful shutdown (v0.5 spec AC8). */
+export const DEFAULT_DRAIN_MS = 2_000;
 
 export async function startHttpServer(
   opts: StartHttpOptions = {},
@@ -307,7 +326,16 @@ export async function startHttpServer(
       ? requested
       : await pickPort(opts.scanFrom ?? DEFAULT_PORT, opts.scanTo ?? PORT_SCAN_MAX);
 
+  // Track in-flight responses so gracefulClose can wait for them to finish.
+  // We add on listener-arrival and remove on response.close (fires for both
+  // normal `end` and aborted connections). Using a Set + per-response
+  // listener attach keeps the bookkeeping local to this function — no
+  // module-level state.
+  const inflight = new Set<ServerResponse>();
+
   const server = createServer((req, res) => {
+    inflight.add(res);
+    res.once("close", () => inflight.delete(res));
     void (async () => {
       const { status, body } = await dispatchHttp(req);
       sendJson(res, status, body);
@@ -325,5 +353,53 @@ export async function startHttpServer(
   const port =
     typeof addr === "object" && addr !== null ? addr.port : listenPort;
 
-  return { server, port, url: `http://127.0.0.1:${port}` };
+  let closed = false;
+  const gracefulClose = async (
+    timeoutMs: number = DEFAULT_DRAIN_MS,
+  ): Promise<{ drained: boolean; inflightAtStart: number; inflightAtEnd: number }> => {
+    const inflightAtStart = inflight.size;
+    if (closed) {
+      return { drained: true, inflightAtStart, inflightAtEnd: 0 };
+    }
+    closed = true;
+
+    // 1. Stop accepting new connections. server.close() resolves once every
+    //    existing connection finishes — we manage that ourselves below.
+    const closePromise = new Promise<void>((resolve) => {
+      server.close(() => resolve());
+    });
+
+    // 2. Wait for in-flight to drain, polling-free: use the `close` events
+    //    we've already wired. Each delete fires after we're notified.
+    const drained = await new Promise<boolean>((resolve) => {
+      if (inflight.size === 0) {
+        resolve(true);
+        return;
+      }
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      const check = (): void => {
+        if (inflight.size === 0) {
+          clearTimeout(timer);
+          resolve(true);
+        }
+      };
+      // Subscribe to each pending response's close — when the last one
+      // fires, we resolve.
+      for (const res of inflight) {
+        res.once("close", check);
+      }
+    });
+
+    // 3. If we timed out with in-flight remaining, force-close. This is
+    //    the only path that breaks a client mid-response, and only after
+    //    the spec's 2s drain budget.
+    if (!drained && typeof server.closeAllConnections === "function") {
+      server.closeAllConnections();
+    }
+
+    await closePromise;
+    return { drained, inflightAtStart, inflightAtEnd: inflight.size };
+  };
+
+  return { server, port, url: `http://127.0.0.1:${port}`, gracefulClose };
 }

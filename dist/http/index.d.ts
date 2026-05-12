@@ -66,7 +66,25 @@ interface StartedHttp {
     server: Server;
     port: number;
     url: string;
+    /**
+     * Graceful shutdown — see v0.5 spec AC8.
+     *
+     * 1. Stop accepting new connections (`server.close()`).
+     * 2. Wait for in-flight requests to finish, up to `timeoutMs`.
+     * 3. On timeout, force-close residual connections via
+     *    `server.closeAllConnections()` (Node >= 18.2).
+     *
+     * Resolves with `{drained: true, inflightAtStart, inflightAtEnd}` once
+     * the server is fully closed. Idempotent.
+     */
+    gracefulClose: (timeoutMs?: number) => Promise<{
+        drained: boolean;
+        inflightAtStart: number;
+        inflightAtEnd: number;
+    }>;
 }
+/** Default drain budget for graceful shutdown (v0.5 spec AC8). */
+declare const DEFAULT_DRAIN_MS = 2000;
 declare function startHttpServer(opts?: StartHttpOptions): Promise<StartedHttp>;
 
 /**
@@ -151,7 +169,8 @@ interface AttachedWs {
     broadcaster: WsBroadcaster;
     wss: WebSocketServer;
     /** Detach + close everything. Idempotent. */
-    close: () => Promise<void>;
+    /** Detach + close everything. Idempotent. Drain budget defaults to 2s. */
+    close: (timeoutMs?: number) => Promise<void>;
 }
 /**
  * Attach a WS server at `/events` on the given HTTP server. Wires reminders
@@ -174,6 +193,16 @@ declare function attachWebSocket(http: Server, opts?: AttachWsOptions): Attached
 
 interface StartDaemonOptions extends StartHttpOptions, AttachWsOptions {
 }
+interface ShutdownReport {
+    /** True when HTTP drained in-flight requests before the timeout. */
+    httpDrained: boolean;
+    /** In-flight HTTP requests at shutdown start. */
+    inflightAtStart: number;
+    /** WS clients that received a 1001 close frame (or were terminated). */
+    wsClientsClosed: number;
+    /** Wall-clock ms the shutdown actually took. */
+    elapsedMs: number;
+}
 interface StartedDaemon {
     /** Bound port. */
     port: number;
@@ -183,9 +212,12 @@ interface StartedDaemon {
     http: StartedHttp;
     /** WS attachment handle. */
     ws: AttachedWs;
-    /** Gracefully close HTTP + WS. Idempotent. */
-    close: () => Promise<void>;
+    /**
+     * Gracefully close HTTP + WS within `timeoutMs` (default 2000 — v0.5
+     * spec AC8). Returns a report with drain status. Idempotent.
+     */
+    close: (timeoutMs?: number) => Promise<ShutdownReport>;
 }
 declare function startDaemon(opts?: StartDaemonOptions): Promise<StartedDaemon>;
 
-export { type AttachWsOptions, type AttachedWs, DEFAULT_PORT, type DispatchResult, PORT_SCAN_MAX, type StartDaemonOptions, type StartHttpOptions, type StartedDaemon, type StartedHttp, WsBroadcaster, type WsEvent, attachWebSocket, dispatchHttp, isLoopbackHost, startDaemon, startHttpServer, startSessionsDiffPoller };
+export { type AttachWsOptions, type AttachedWs, DEFAULT_DRAIN_MS, DEFAULT_PORT, type DispatchResult, PORT_SCAN_MAX, type ShutdownReport, type StartDaemonOptions, type StartHttpOptions, type StartedDaemon, type StartedHttp, WsBroadcaster, type WsEvent, attachWebSocket, dispatchHttp, isLoopbackHost, startDaemon, startHttpServer, startSessionsDiffPoller };

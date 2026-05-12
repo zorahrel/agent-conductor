@@ -69,7 +69,8 @@
     "test": "tsx --test 'src/**/*.spec.ts'",
     "test:once": "tsx --test 'src/**/*.spec.ts' --test-reporter spec",
     "test:cli": "bash tests/cli.bats.sh",
-    "test:all": "npm test && npm run test:cli",
+    "test:backcompat": "npm run build && node examples/v04-backcompat.mjs",
+    "test:all": "npm test && npm run test:cli && npm run test:backcompat",
     "prepublishOnly": "npm run build"
   },
   "keywords": [

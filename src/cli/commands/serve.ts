@@ -70,8 +70,12 @@ export async function serveCmd(args: ParsedArgs): Promise<number> {
     return (async () => {
       process.stdout.write(`\nagent-conductor: ${signal} received — draining...\n`);
       try {
-        await daemon.close();
-        process.stdout.write(`agent-conductor: closed cleanly\n`);
+        const report = await daemon.close();
+        const status = report.httpDrained ? "clean" : "timed out (forced)";
+        process.stdout.write(
+          `agent-conductor: closed ${status} in ${report.elapsedMs}ms ` +
+            `(http inflight ${report.inflightAtStart}→0, ws clients ${report.wsClientsClosed})\n`,
+        );
       } catch (err) {
         process.stderr.write(
           `agent-conductor: shutdown error: ${(err as Error).message}\n`,
