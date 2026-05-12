@@ -32,6 +32,34 @@ When you're running 3+ Claude Code (or other AI coding agent) CLI sessions in pa
 - **tmux inject control** — maps `pid → pane` via parent-walk, sends keystrokes via `tmux send-keys`, and writes an append-only audit log (JSONL with 10 MB rotation)
 - **macOS Reminders bridge** — treats Apple Reminders as the intent layer. New todos sync to iPhone / Watch / Siri; check them off anywhere, the polling diff loop emits `todo:added` / `todo:completed` / `todo:updated`
 
+## Side-car, not host — when NOT to use this
+
+There are two ways to "manage many AI coding sessions" and they look the same from outside but are architecturally opposite:
+
+| | **Side-car / observer** (this library) | **Host / controller** |
+|---|---|---|
+| Process ownership | None. Finds existing sessions via `ps`. | Spawns the CLI as a `ChildProcess` and owns its stdin/stdout. |
+| Data source | Tails the JSONL transcript on disk. | Live protocol stream (stream-json, JSON-RPC). |
+| Inject | `tmux send-keys` into your existing pane. | `process.stdin.write` at the protocol level. |
+| Status latency | File mtime + 2 s cache. | Live, from owned process events. |
+| Permission prompts / `AskUserQuestion` | Not visible — the CLI is talking to the human's terminal. | Intercepted from `control_request` events. |
+| Runtime model / reasoning / service tier swap | Not possible — the CLI is already running. | Set on the owned process. |
+| Crash detection | Heuristic (`pidAlive===false AND no stop_reason`). | Deterministic (`child.on('exit')`). |
+| Works on a Claude Code session the human launched 3 hours ago in tmux | ✅ that's the whole point | ❌ has to be the one to start it |
+
+If you want a turnkey Electron workspace with Kanban, drag-drop panes, PR integration, signed installers, and an opinionated UI that owns every agent it talks to, use **[Tessera](https://github.com/horang-labs/tessera)**. It is excellent at being that thing.
+
+`agent-conductor` is the toolkit you reach for when:
+
+- You want to observe and pilot sessions **a human (or another tool) already started** in their own tmux/terminal — without ripping them out of their workflow.
+- You want **primitives** (`buildSnapshot()`, `sendKeys()`, `listTodos()`) to compose into your own dashboard, menu-bar app, notch UI, Discord bot, or router — not a finished IDE.
+- You want an **append-only JSONL audit log** for every inject (forensic-grade, `jq`-friendly, 10 MB rotation) — not a SQLite-only history.
+- You want **zero runtime deps** and a `bin` you can drop into CI / cron / scripts.
+- You want **macOS Reminders as the intent layer** — todos that flow from Siri / Watch / iPhone into your agents, not a workspace UI that owns the todos.
+- You want a **deterministic suggestion engine** (pure lookup table, no LLM, no token cost) that you can gate auto-pilot on with `confidence === "high"`.
+
+The two approaches compose well: `agent-conductor` can sit alongside a host-mode workspace and observe sessions the workspace doesn't own. An MCP server surface that makes this composition first-class is on the v0.5 roadmap (see below).
+
 ## Multi-provider by default
 
 Every agent CLI stores its sessions differently — Claude Code uses JSONL under `~/.claude/projects/`, Aider writes markdown, Cursor's CLI has its own format. Rather than hardcode "this is for Claude Code", `agent-conductor` ships with an `AgentProvider` interface and a registry of providers. Claude Code is the default; switching provider is one flag away.
@@ -181,29 +209,41 @@ Full types are exported via the barrel: `RefinedStatus`, `Confidence`, `Suggesti
 
 ## Roadmap
 
-### v0.2 — Public release (current)
+### v0.2 — Public release ✅
 
 - [x] MIT license, public repo
 - [x] English docs + logo
 - [x] Sanitized fixtures (no PII)
 
-### v0.3 — Provider adapters
+### v0.3 — CLI binary + community docs ✅
 
-- [ ] Aider CLI adapter (parse `.aider.chat.history.md`)
-- [ ] Cursor CLI adapter
-- [ ] ChatGPT CLI adapter (`shell-gpt`, `chatblade`)
-- [ ] Generic `SessionProvider` interface so users can wire their own
+- [x] `agent-conductor` CLI with `snapshot` / `sessions` / `transcript` / `todos` / `tmux` / `inject` / `audit`
+- [x] CI matrix (Node 20 + 22), bash CLI integration tests
+- [x] `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, examples
 
-### v0.4 — Cross-platform intent layer
+### v0.4 — Multi-provider architecture ✅ (current)
+
+- [x] `AgentProvider` interface + registry
+- [x] `claude-code` provider — full impl
+- [x] `aider` + `cursor-cli` providers — discovery + tmux inject (transcript parsers ⏳ v0.5)
+- [x] `--provider` and `--all-providers` flags on all read commands
+
+### v0.5 — Headless daemon + MCP surface (next)
+
+Doubling down on the side-car positioning: instead of competing on UI, become the **observability back-end** that other workspaces (Tessera, custom dashboards, the user's own notch / tray / router) consume via standard protocols.
+
+- [ ] **MCP server** — expose `snapshot`, `inject`, `audit`, `todos`, `transcript` as MCP tools. Host-mode workspaces can read live state of sessions they don't own. Spec: [`docs/v0.5-spec.md`](./docs/v0.5-spec.md).
+- [ ] **Headless daemon** — long-running process with HTTP + WebSocket transport. Stable contract for non-Node consumers (Swift menu-bar, Rust TUI, Python script).
+- [ ] **Time-series metrics** — local SQLite of `(ts, pid, refinedStatus, turn_count, tool_count)` so dashboards can graph activity without re-parsing JSONL. Prometheus-format exporter optional.
+- [ ] **Aider transcript parser** — `.aider.chat.history.md` to `TranscriptTurnShape`.
+- [ ] **Cursor CLI transcript parser** — whatever format it stabilises on.
+
+### v0.6 — Cross-platform intent layer
 
 - [ ] Local-file fallback (`~/.config/agent-conductor/todos.json`) with watch-mode
-- [ ] Linux: `gnome-todo` / `evolution-data-server` adapter
-- [ ] Windows: Microsoft To Do adapter (Graph API, optional)
-
-### v0.5 — Bundled HTTP server
-
-- [ ] Optional Fastify or Hono server that exposes the API over HTTP, so non-Node clients (Swift, Rust, Python apps) can consume the snapshot without re-implementing the integration
-- [ ] WebSocket event stream (`sessions:update`, `todos:update`)
+- [ ] Linux intent backends (`task` / `todo.txt` / `gnome-todo`)
+- [ ] Windows: Microsoft To Do via Graph API (optional)
+- [ ] ChatGPT CLI adapter (`shell-gpt`, `chatblade`)
 
 ### Maybe-someday
 
