@@ -24,6 +24,7 @@ export default defineConfig({
     "reminders/index": "src/reminders/index.ts",
     "discovery/index": "src/discovery/index.ts",
     "providers/index": "src/providers/index.ts",
+    "mcp/index": "src/mcp/index.ts",
     "cli/bin": "src/cli/bin.ts",
   },
   format: ["esm", "cjs"],
