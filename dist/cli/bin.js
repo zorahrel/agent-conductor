@@ -2374,10 +2374,14 @@ function pickPort(start, max) {
     tryPort(start);
   });
 }
+var DEFAULT_DRAIN_MS = 2e3;
 async function startHttpServer(opts = {}) {
   const requested = opts.port;
   const listenPort = requested !== void 0 ? requested : await pickPort(opts.scanFrom ?? DEFAULT_PORT, opts.scanTo ?? PORT_SCAN_MAX);
+  const inflight = /* @__PURE__ */ new Set();
   const server = createServer((req, res) => {
+    inflight.add(res);
+    res.once("close", () => inflight.delete(res));
     void (async () => {
       const { status, body } = await dispatchHttp(req);
       sendJson(res, status, body);
@@ -2389,7 +2393,39 @@ async function startHttpServer(opts = {}) {
   });
   const addr = server.address();
   const port = typeof addr === "object" && addr !== null ? addr.port : listenPort;
-  return { server, port, url: `http://127.0.0.1:${port}` };
+  let closed = false;
+  const gracefulClose = async (timeoutMs = DEFAULT_DRAIN_MS) => {
+    const inflightAtStart = inflight.size;
+    if (closed) {
+      return { drained: true, inflightAtStart, inflightAtEnd: 0 };
+    }
+    closed = true;
+    const closePromise = new Promise((resolve) => {
+      server.close(() => resolve());
+    });
+    const drained = await new Promise((resolve) => {
+      if (inflight.size === 0) {
+        resolve(true);
+        return;
+      }
+      const timer = setTimeout(() => resolve(false), timeoutMs);
+      const check = () => {
+        if (inflight.size === 0) {
+          clearTimeout(timer);
+          resolve(true);
+        }
+      };
+      for (const res of inflight) {
+        res.once("close", check);
+      }
+    });
+    if (!drained && typeof server.closeAllConnections === "function") {
+      server.closeAllConnections();
+    }
+    await closePromise;
+    return { drained, inflightAtStart, inflightAtEnd: inflight.size };
+  };
+  return { server, port, url: `http://127.0.0.1:${port}`, gracefulClose };
 }
 var DEFAULT_SESSIONS_POLL_MS = 5e3;
 var WsBroadcaster = class {
@@ -2529,12 +2565,42 @@ function attachWebSocket(http, opts = {}) {
     });
   };
   http.on("upgrade", onUpgrade);
-  const close = async () => {
+  const close = async (timeoutMs = 2e3) => {
     http.off("upgrade", onUpgrade);
     if (stopReminders) stopReminders();
     if (stopSessions) stopSessions();
     stopReminders = null;
     stopSessions = null;
+    const clients = Array.from(wss.clients);
+    if (clients.length > 0) {
+      await new Promise((resolve) => {
+        let remaining = clients.length;
+        const done = () => {
+          remaining -= 1;
+          if (remaining <= 0) resolve();
+        };
+        const timer = setTimeout(() => {
+          for (const c of clients) {
+            if (c.readyState !== c.CLOSED) {
+              try {
+                c.terminate();
+              } catch {
+              }
+            }
+          }
+          resolve();
+        }, timeoutMs);
+        timer.unref();
+        for (const c of clients) {
+          c.once("close", done);
+          try {
+            c.close(1001, "server shutting down");
+          } catch {
+            done();
+          }
+        }
+      });
+    }
     await new Promise((resolve) => {
       wss.close(() => resolve());
     });
@@ -2547,13 +2613,30 @@ async function startDaemon(opts = {}) {
   const http = await startHttpServer(opts);
   const ws = attachWebSocket(http.server, opts);
   let closed = false;
-  const close = async () => {
-    if (closed) return;
+  let cachedReport = null;
+  const close = async (timeoutMs = DEFAULT_DRAIN_MS) => {
+    if (closed) {
+      return cachedReport ?? {
+        httpDrained: true,
+        inflightAtStart: 0,
+        wsClientsClosed: 0,
+        elapsedMs: 0
+      };
+    }
     closed = true;
-    await ws.close();
-    await new Promise((resolve) => {
-      http.server.close(() => resolve());
-    });
+    const t0 = Date.now();
+    const wsClientsAtStart = http.server.listening ? ws.wss.clients.size : 0;
+    const half = Math.max(100, Math.floor(timeoutMs / 2));
+    await ws.close(half);
+    const httpReport = await http.gracefulClose(half);
+    const report = {
+      httpDrained: httpReport.drained,
+      inflightAtStart: httpReport.inflightAtStart,
+      wsClientsClosed: wsClientsAtStart,
+      elapsedMs: Date.now() - t0
+    };
+    cachedReport = report;
+    return report;
   };
   return { port: http.port, url: http.url, http, ws, close };
 }
@@ -2614,9 +2697,12 @@ async function serveCmd(args) {
 agent-conductor: ${signal} received \u2014 draining...
 `);
       try {
-        await daemon.close();
-        process.stdout.write(`agent-conductor: closed cleanly
-`);
+        const report = await daemon.close();
+        const status = report.httpDrained ? "clean" : "timed out (forced)";
+        process.stdout.write(
+          `agent-conductor: closed ${status} in ${report.elapsedMs}ms (http inflight ${report.inflightAtStart}\u21920, ws clients ${report.wsClientsClosed})
+`
+        );
       } catch (err) {
         process.stderr.write(
           `agent-conductor: shutdown error: ${err.message}

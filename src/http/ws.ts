@@ -159,7 +159,8 @@ export interface AttachedWs {
   broadcaster: WsBroadcaster;
   wss: WebSocketServer;
   /** Detach + close everything. Idempotent. */
-  close: () => Promise<void>;
+  /** Detach + close everything. Idempotent. Drain budget defaults to 2s. */
+  close: (timeoutMs?: number) => Promise<void>;
 }
 
 /**
@@ -267,12 +268,60 @@ export function attachWebSocket(
   };
   http.on("upgrade", onUpgrade);
 
-  const close = async (): Promise<void> => {
+  /**
+   * Graceful WS shutdown (v0.5 spec AC8):
+   * 1. Detach the upgrade handler so no new clients can join.
+   * 2. Stop pollers.
+   * 3. Send a 1001 ("going away") close frame to every connected client
+   *    and wait for them to acknowledge — up to `timeoutMs`.
+   * 4. Force-terminate any laggard via `ws.terminate()` once the budget
+   *    is exhausted.
+   * 5. Close the WebSocketServer itself.
+   *
+   * Without step 3 the `ws` library defaults to a 1005 ("no status") frame
+   * on `wss.close()`, which most clients log as an abnormal disconnect.
+   */
+  const close = async (timeoutMs: number = 2_000): Promise<void> => {
     http.off("upgrade", onUpgrade);
     if (stopReminders) stopReminders();
     if (stopSessions) stopSessions();
     stopReminders = null;
     stopSessions = null;
+
+    const clients = Array.from(wss.clients);
+    if (clients.length > 0) {
+      // Send 1001 to each and race their close events against the deadline.
+      await new Promise<void>((resolve) => {
+        let remaining = clients.length;
+        const done = (): void => {
+          remaining -= 1;
+          if (remaining <= 0) resolve();
+        };
+        const timer = setTimeout(() => {
+          // Hard stop — terminate anyone still connected.
+          for (const c of clients) {
+            if (c.readyState !== c.CLOSED) {
+              try {
+                c.terminate();
+              } catch {
+                /* ignore */
+              }
+            }
+          }
+          resolve();
+        }, timeoutMs);
+        timer.unref();
+        for (const c of clients) {
+          c.once("close", done);
+          try {
+            c.close(1001, "server shutting down");
+          } catch {
+            done();
+          }
+        }
+      });
+    }
+
     await new Promise<void>((resolve) => {
       wss.close(() => resolve());
     });
