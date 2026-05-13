@@ -26,6 +26,7 @@ export default defineConfig({
     "providers/index": "src/providers/index.ts",
     "mcp/index": "src/mcp/index.ts",
     "http/index": "src/http/index.ts",
+    "timeseries/index": "src/timeseries/index.ts",
     "cli/bin": "src/cli/bin.ts",
   },
   format: ["esm", "cjs"],

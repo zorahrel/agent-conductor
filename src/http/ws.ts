@@ -32,6 +32,7 @@ import type { TodoEvent } from "../types/reminders.js";
 import { allProviders } from "../providers/registry.js";
 import { refinedStatusFor } from "../sessions/refinedStatus.js";
 import type { RefinedStatus } from "../types/sessions.js";
+import type { TimeseriesStore, Sample } from "../timeseries/store.js";
 
 /** Default cadence — matches v0.5 spec §6 D5 (5s, ~ refinedStatus cache TTL × 2.5). */
 const DEFAULT_SESSIONS_POLL_MS = 5_000;
@@ -97,9 +98,21 @@ function serverVersion(): string {
  * Returns a `stop()` thunk so the WS server can tear it down on the last
  * client disconnect.
  */
+export interface DiffPollerOptions {
+  /** Optional samples sink — when present, every observed status is recorded. */
+  store?: TimeseriesStore;
+  /**
+   * Cumulative counter the caller maintains across pollers (so it survives
+   * pruning + reflects rows actually written, not just rows currently in
+   * the table). We bump it via the callback.
+   */
+  onSampleWritten?: () => void;
+}
+
 export function startSessionsDiffPoller(
   broadcaster: WsBroadcaster,
   intervalMs: number = DEFAULT_SESSIONS_POLL_MS,
+  pollerOpts: DiffPollerOptions = {},
 ): () => void {
   let stopped = false;
   let prev = new Map<number, RefinedStatus>();
@@ -107,17 +120,24 @@ export function startSessionsDiffPoller(
   const tick = async (): Promise<void> => {
     if (stopped) return;
     try {
-      const merged = await Promise.all(
+      // Aggregate per provider so we can tag samples with the provider that
+      // discovered each session (Prometheus label).
+      const byProvider = await Promise.all(
         allProviders().map(async (p) => {
           try {
-            return await p.discover();
+            return { provider: p.name, sessions: await p.discover() };
           } catch {
-            return [];
+            return { provider: p.name, sessions: [] };
           }
         }),
       );
-      const sessions = merged.flat();
+      const sessions = byProvider.flatMap((b) => b.sessions);
+      const providerByPid = new Map<number, string>();
+      for (const b of byProvider) for (const s of b.sessions) providerByPid.set(s.pid, b.provider);
+
       const next = await refinedStatusFor(sessions);
+      const now = Date.now();
+      const samples: Sample[] = [];
       for (const [pid, status] of next.entries()) {
         const previous = prev.get(pid) ?? null;
         if (previous !== status) {
@@ -125,6 +145,28 @@ export function startSessionsDiffPoller(
             type: "sessions:update",
             payload: { pid, refinedStatus: status, previous },
           });
+        }
+        if (pollerOpts.store) {
+          samples.push({
+            ts: now,
+            provider: providerByPid.get(pid) ?? "unknown",
+            pid,
+            refinedStatus: status,
+            turnCount: null,
+            toolCount: null,
+            lastWriteAge: null,
+          });
+        }
+      }
+      if (pollerOpts.store && samples.length > 0) {
+        try {
+          pollerOpts.store.writeMany(samples);
+          for (let i = 0; i < samples.length; i += 1) pollerOpts.onSampleWritten?.();
+          // Opportunistic prune — cheap when under cap, no-op when not.
+          pollerOpts.store.prune();
+        } catch {
+          // Disk full / locked / etc. Drop this batch silently — the
+          // observability store must not break the live stream.
         }
       }
       prev = next;
@@ -153,6 +195,10 @@ export interface AttachWsOptions {
   reminderPoll?: Partial<PollOptions>;
   /** Sessions diff poll cadence override (ms). */
   sessionsPollMs?: number;
+  /** Optional timeseries store — when present, the diff poller writes samples. */
+  timeseriesStore?: TimeseriesStore;
+  /** Optional callback fired once per sample written. Used by Prometheus exporter. */
+  onSampleWritten?: () => void;
 }
 
 export interface AttachedWs {
@@ -204,6 +250,7 @@ export function attachWebSocket(
       stopSessions = startSessionsDiffPoller(
         broadcaster,
         opts.sessionsPollMs ?? DEFAULT_SESSIONS_POLL_MS,
+        { store: opts.timeseriesStore, onSampleWritten: opts.onSampleWritten },
       );
     }
   };
