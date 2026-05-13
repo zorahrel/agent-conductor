@@ -1156,7 +1156,7 @@ function allToolDescriptors() {
 
 // src/mcp/server.ts
 function serverVersion() {
-  return "0.4.0";
+  return "0.5.0";
 }
 async function dispatch(req) {
   if (req.jsonrpc !== "2.0" || typeof req.method !== "string") {
