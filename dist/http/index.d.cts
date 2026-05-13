@@ -1,4 +1,5 @@
 import { Server, IncomingMessage } from 'node:http';
+import { T as TimeseriesStore, a as TimeseriesStoreOptions } from '../store-a03wprzn.cjs';
 import { WebSocketServer } from 'ws';
 import { T as TodoEvent, P as PollOptions } from '../poll-BrgFV9zk.cjs';
 import { R as RefinedStatus } from '../sessions-CdTstnnc.cjs';
@@ -43,12 +44,30 @@ declare function isLoopbackHost(host: string | undefined): boolean;
  * Core dispatcher — pure-ish: takes an IncomingMessage, returns the JSON
  * body and status. Exported so `server.spec.ts` can invoke it with a fake
  * request and assert the contract without spawning a server.
+ *
+ * The result is JSON unless `contentType` is set, in which case `body`
+ * is treated as a string and served verbatim (used by /metrics).
  */
 interface DispatchResult {
     status: number;
     body: unknown;
+    /** Non-JSON Content-Type (e.g. Prometheus exposition). When set, body must be a string. */
+    contentType?: string;
 }
-declare function dispatchHttp(req: IncomingMessage): Promise<DispatchResult>;
+/**
+ * Optional context for routes that need live state (timeseries store,
+ * Prometheus exporter). When omitted, the corresponding routes either
+ * degrade (e.g. /metrics returns only build_info) or 404.
+ */
+interface DispatchContext {
+    store?: TimeseriesStore;
+    samplesWritten?: () => number;
+    todos?: () => {
+        open: number;
+        completed: number;
+    } | undefined;
+}
+declare function dispatchHttp(req: IncomingMessage, ctx?: DispatchContext): Promise<DispatchResult>;
 /**
  * Wire the dispatcher to a real HTTP server bound on loopback. Returns the
  * server instance so callers (CLI, tests, embedders) can attach a WS upgrade
@@ -57,11 +76,6 @@ declare function dispatchHttp(req: IncomingMessage): Promise<DispatchResult>;
  * Port selection: explicit `opts.port` is honoured exactly (fails if busy);
  * omitted port triggers the scan from DEFAULT_PORT.
  */
-interface StartHttpOptions {
-    port?: number;
-    scanFrom?: number;
-    scanTo?: number;
-}
 interface StartedHttp {
     server: Server;
     port: number;
@@ -85,6 +99,13 @@ interface StartedHttp {
 }
 /** Default drain budget for graceful shutdown (v0.5 spec AC8). */
 declare const DEFAULT_DRAIN_MS = 2000;
+interface StartHttpOptions {
+    port?: number;
+    scanFrom?: number;
+    scanTo?: number;
+    /** Dispatch context — feeds /metrics with live store + counter + todos. */
+    ctx?: DispatchContext;
+}
 declare function startHttpServer(opts?: StartHttpOptions): Promise<StartedHttp>;
 
 /**
@@ -153,7 +174,17 @@ declare class WsBroadcaster {
  * Returns a `stop()` thunk so the WS server can tear it down on the last
  * client disconnect.
  */
-declare function startSessionsDiffPoller(broadcaster: WsBroadcaster, intervalMs?: number): () => void;
+interface DiffPollerOptions {
+    /** Optional samples sink — when present, every observed status is recorded. */
+    store?: TimeseriesStore;
+    /**
+     * Cumulative counter the caller maintains across pollers (so it survives
+     * pruning + reflects rows actually written, not just rows currently in
+     * the table). We bump it via the callback.
+     */
+    onSampleWritten?: () => void;
+}
+declare function startSessionsDiffPoller(broadcaster: WsBroadcaster, intervalMs?: number, pollerOpts?: DiffPollerOptions): () => void;
 interface AttachWsOptions {
     /**
      * Pre-built broadcaster. Tests can pass their own to assert against; the
@@ -164,6 +195,10 @@ interface AttachWsOptions {
     reminderPoll?: Partial<PollOptions>;
     /** Sessions diff poll cadence override (ms). */
     sessionsPollMs?: number;
+    /** Optional timeseries store — when present, the diff poller writes samples. */
+    timeseriesStore?: TimeseriesStore;
+    /** Optional callback fired once per sample written. Used by Prometheus exporter. */
+    onSampleWritten?: () => void;
 }
 interface AttachedWs {
     broadcaster: WsBroadcaster;
@@ -183,15 +218,22 @@ declare function attachWebSocket(http: Server, opts?: AttachWsOptions): Attached
  * agent-conductor HTTP daemon — public surface.
  *
  * Two entry shapes:
- *   - `startDaemon({ port? })` — convenience that starts HTTP + WS on the
- *     same loopback port, returns a single close() handle. The CLI uses this.
- *   - `startHttpServer()` + `attachWebSocket()` — pieces, for embedders that
- *     want to wire their own pollers / route their own upgrade events.
+ *   - `startDaemon({ port?, timeseries? })` — convenience that starts HTTP +
+ *     WS (and optionally the SQLite samples store) on the same loopback
+ *     port, returns a single close() handle. The CLI uses this.
+ *   - `startHttpServer()` + `attachWebSocket()` — pieces, for embedders
+ *     that want to wire their own pollers / route their own upgrade events.
  *
  * Both honor the loopback Host guard and 127.0.0.1-only bind.
  */
 
-interface StartDaemonOptions extends StartHttpOptions, AttachWsOptions {
+interface StartDaemonOptions extends Omit<StartHttpOptions, "ctx">, Omit<AttachWsOptions, "timeseriesStore" | "onSampleWritten"> {
+    /**
+     * Enable the SQLite samples store. Default false — opt-in to honor the
+     * "no telemetry, no network" promise. Accepts a boolean (use defaults) or
+     * an options object for custom path/maxRows.
+     */
+    timeseries?: boolean | TimeseriesStoreOptions;
 }
 interface ShutdownReport {
     /** True when HTTP drained in-flight requests before the timeout. */
@@ -202,6 +244,8 @@ interface ShutdownReport {
     wsClientsClosed: number;
     /** Wall-clock ms the shutdown actually took. */
     elapsedMs: number;
+    /** Cumulative samples written to the store during this daemon's lifetime. */
+    samplesWritten: number;
 }
 interface StartedDaemon {
     /** Bound port. */
@@ -212,6 +256,10 @@ interface StartedDaemon {
     http: StartedHttp;
     /** WS attachment handle. */
     ws: AttachedWs;
+    /** Timeseries store when enabled — null when --timeseries flag was off. */
+    store: TimeseriesStore | null;
+    /** Cumulative samples written counter (survives store pruning). */
+    samplesWritten: () => number;
     /**
      * Gracefully close HTTP + WS within `timeoutMs` (default 2000 — v0.5
      * spec AC8). Returns a report with drain status. Idempotent.
@@ -220,4 +268,4 @@ interface StartedDaemon {
 }
 declare function startDaemon(opts?: StartDaemonOptions): Promise<StartedDaemon>;
 
-export { type AttachWsOptions, type AttachedWs, DEFAULT_DRAIN_MS, DEFAULT_PORT, type DispatchResult, PORT_SCAN_MAX, type ShutdownReport, type StartDaemonOptions, type StartHttpOptions, type StartedDaemon, type StartedHttp, WsBroadcaster, type WsEvent, attachWebSocket, dispatchHttp, isLoopbackHost, startDaemon, startHttpServer, startSessionsDiffPoller };
+export { type AttachWsOptions, type AttachedWs, DEFAULT_DRAIN_MS, DEFAULT_PORT, type DispatchContext, type DispatchResult, PORT_SCAN_MAX, type ShutdownReport, type StartDaemonOptions, type StartHttpOptions, type StartedDaemon, type StartedHttp, WsBroadcaster, type WsEvent, attachWebSocket, dispatchHttp, isLoopbackHost, startDaemon, startHttpServer, startSessionsDiffPoller };

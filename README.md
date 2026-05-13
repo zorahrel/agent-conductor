@@ -6,14 +6,14 @@
   **Pilot N concurrent AI coding agent CLI sessions from one place.**
 
   <p>
-    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.4.0-6366f1?style=flat-square" alt="version"/></a>
+    <a href="https://github.com/zorahrel/agent-conductor/releases"><img src="https://img.shields.io/badge/version-0.5.0-6366f1?style=flat-square" alt="version"/></a>
     <a href="./LICENSE"><img src="https://img.shields.io/badge/license-MIT-22c55e?style=flat-square" alt="license"/></a>
     <a href="https://github.com/zorahrel/agent-conductor/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/zorahrel/agent-conductor/ci.yml?branch=main&label=ci&style=flat-square" alt="ci"/></a>
-    <img src="https://img.shields.io/badge/tests-109%20green-22c55e?style=flat-square" alt="tests"/>
-    <img src="https://img.shields.io/badge/multi--provider-yes-a78bfa?style=flat-square" alt="multi-provider"/>
+    <img src="https://img.shields.io/badge/tests-152%20green-22c55e?style=flat-square" alt="tests"/>
+    <img src="https://img.shields.io/badge/mcp%20%2B%20http%20%2B%20ws-yes-a78bfa?style=flat-square" alt="mcp http ws"/>
     <img src="https://img.shields.io/badge/node-%E2%89%A520-3b82f6?style=flat-square" alt="node"/>
     <img src="https://img.shields.io/badge/typescript-strict-3178c6?style=flat-square" alt="ts"/>
-    <img src="https://img.shields.io/badge/runtime%20deps-0-22c55e?style=flat-square" alt="zero-deps"/>
+    <img src="https://img.shields.io/badge/runtime%20deps-2-22c55e?style=flat-square" alt="2 runtime deps"/>
     <img src="https://img.shields.io/badge/platform-macOS-0f172a?style=flat-square" alt="platform"/>
   </p>
 </div>

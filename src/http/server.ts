@@ -35,6 +35,11 @@ import {
   allProviders,
   DEFAULT_PROVIDER_NAME,
 } from "../providers/registry.js";
+import {
+  renderPrometheus,
+  PROMETHEUS_CONTENT_TYPE,
+  type TimeseriesStore,
+} from "../timeseries/index.js";
 
 /** Default port range (inclusive). 32140 is rare-enough to avoid common collisions. */
 export const DEFAULT_PORT = 32140;
@@ -65,6 +70,25 @@ function sendJson(
     "Cache-Control": "no-store",
   });
   res.end(text);
+}
+
+/**
+ * Plain-text response writer for the Prometheus exposition endpoint.
+ * Distinct from `sendJson` because Prometheus requires its specific
+ * Content-Type header (`text/plain; version=0.0.4`).
+ */
+function sendText(
+  res: ServerResponse,
+  status: number,
+  contentType: string,
+  body: string,
+): void {
+  res.writeHead(status, {
+    "Content-Type": contentType,
+    "Content-Length": Buffer.byteLength(body).toString(),
+    "Cache-Control": "no-store",
+  });
+  res.end(body);
 }
 
 /**
@@ -186,13 +210,32 @@ const STARTED_AT = Date.now();
  * Core dispatcher — pure-ish: takes an IncomingMessage, returns the JSON
  * body and status. Exported so `server.spec.ts` can invoke it with a fake
  * request and assert the contract without spawning a server.
+ *
+ * The result is JSON unless `contentType` is set, in which case `body`
+ * is treated as a string and served verbatim (used by /metrics).
  */
 export interface DispatchResult {
   status: number;
   body: unknown;
+  /** Non-JSON Content-Type (e.g. Prometheus exposition). When set, body must be a string. */
+  contentType?: string;
 }
 
-export async function dispatchHttp(req: IncomingMessage): Promise<DispatchResult> {
+/**
+ * Optional context for routes that need live state (timeseries store,
+ * Prometheus exporter). When omitted, the corresponding routes either
+ * degrade (e.g. /metrics returns only build_info) or 404.
+ */
+export interface DispatchContext {
+  store?: TimeseriesStore;
+  samplesWritten?: () => number;
+  todos?: () => { open: number; completed: number } | undefined;
+}
+
+export async function dispatchHttp(
+  req: IncomingMessage,
+  ctx: DispatchContext = {},
+): Promise<DispatchResult> {
   // 1. Method gate — read-only daemon, only GET (and HEAD via Node default).
   if (req.method !== "GET" && req.method !== "HEAD") {
     return { status: 405, body: { error: "method_not_allowed", allowed: ["GET"] } };
@@ -226,19 +269,48 @@ export async function dispatchHttp(req: IncomingMessage): Promise<DispatchResult
         return { status: 200, body: await handleSessions(query) };
       case "/audit":
         return { status: 200, body: await handleAudit(query) };
+      case "/metrics":
+        return {
+          status: 200,
+          contentType: PROMETHEUS_CONTENT_TYPE,
+          body: renderPrometheus({
+            version: serverVersion(),
+            store: ctx.store,
+            samplesWritten: ctx.samplesWritten?.(),
+            auditBytes: await safeAuditBytes(),
+            todos: ctx.todos?.(),
+          }),
+        };
       default:
         return {
           status: 404,
           body: {
             error: "not_found",
             path,
-            routes: ["/health", "/snapshot", "/sessions", "/audit", "/events (WebSocket)"],
+            routes: [
+              "/health",
+              "/snapshot",
+              "/sessions",
+              "/audit",
+              "/metrics",
+              "/events (WebSocket)",
+            ],
           },
         };
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { status: 500, body: { error: "internal_error", message: msg } };
+  }
+}
+
+/** Best-effort audit log size; nulls on ENOENT so /metrics still renders. */
+async function safeAuditBytes(): Promise<number | null> {
+  try {
+    const st = await fs.stat(AUDIT_FILE_PATH);
+    return st.size;
+  } catch {
+    return null;
   }
 }
 
@@ -286,12 +358,6 @@ function pickPort(start: number, max: number): Promise<number> {
  * Port selection: explicit `opts.port` is honoured exactly (fails if busy);
  * omitted port triggers the scan from DEFAULT_PORT.
  */
-export interface StartHttpOptions {
-  port?: number;
-  scanFrom?: number;
-  scanTo?: number;
-}
-
 export interface StartedHttp {
   server: Server;
   port: number;
@@ -317,6 +383,14 @@ export interface StartedHttp {
 /** Default drain budget for graceful shutdown (v0.5 spec AC8). */
 export const DEFAULT_DRAIN_MS = 2_000;
 
+export interface StartHttpOptions {
+  port?: number;
+  scanFrom?: number;
+  scanTo?: number;
+  /** Dispatch context — feeds /metrics with live store + counter + todos. */
+  ctx?: DispatchContext;
+}
+
 export async function startHttpServer(
   opts: StartHttpOptions = {},
 ): Promise<StartedHttp> {
@@ -337,8 +411,12 @@ export async function startHttpServer(
     inflight.add(res);
     res.once("close", () => inflight.delete(res));
     void (async () => {
-      const { status, body } = await dispatchHttp(req);
-      sendJson(res, status, body);
+      const result = await dispatchHttp(req, opts.ctx ?? {});
+      if (result.contentType) {
+        sendText(res, result.status, result.contentType, String(result.body));
+      } else {
+        sendJson(res, result.status, result.body);
+      }
     })();
   });
 

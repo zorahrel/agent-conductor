@@ -1,11 +1,12 @@
 #!/usr/bin/env node
-import { promises } from 'fs';
+import { promises, existsSync, mkdirSync } from 'fs';
 import { join, basename, sep, dirname } from 'path';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
 import { homedir } from 'os';
 import { createInterface } from 'readline';
 import { createServer } from 'http';
+import Database from 'better-sqlite3';
 import { WebSocketServer } from 'ws';
 
 // src/cli/args.ts
@@ -2060,7 +2061,7 @@ function allToolDescriptors() {
 
 // src/mcp/server.ts
 function serverVersion() {
-  return "0.4.0";
+  return "0.5.0";
 }
 async function dispatch(req) {
   if (req.jsonrpc !== "2.0" || typeof req.method !== "string") {
@@ -2209,10 +2210,211 @@ async function mcpCmd(args) {
   await runStdioServer();
   return 0;
 }
+var DEFAULT_MAX_ROWS = 1e5;
+var PRUNE_BATCH = 1e3;
+function defaultStateDir() {
+  const fromEnv = process.env.AGENT_CONDUCTOR_STATE_DIR;
+  if (fromEnv) return fromEnv;
+  const xdg = process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share");
+  return join(xdg, "agent-conductor");
+}
+var TimeseriesStore = class {
+  path;
+  maxRows;
+  db;
+  insertStmt;
+  countStmt;
+  pruneStmt;
+  latestPerPidStmt;
+  closed = false;
+  constructor(opts = {}) {
+    this.path = opts.path ?? join(defaultStateDir(), "timeseries.db");
+    this.maxRows = opts.maxRows ?? DEFAULT_MAX_ROWS;
+    if (this.path !== ":memory:") {
+      const dir = dirname(this.path);
+      if (!existsSync(dir)) {
+        mkdirSync(dir, { recursive: true });
+      }
+    }
+    this.db = new Database(this.path);
+    if (this.path !== ":memory:") {
+      this.db.pragma("journal_mode = WAL");
+      this.db.pragma("synchronous = NORMAL");
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS samples (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts              INTEGER NOT NULL,
+        provider        TEXT    NOT NULL,
+        pid             INTEGER NOT NULL,
+        refined_status  TEXT    NOT NULL,
+        turn_count      INTEGER,
+        tool_count      INTEGER,
+        last_write_age  INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS idx_samples_ts  ON samples(ts);
+      CREATE INDEX IF NOT EXISTS idx_samples_pid ON samples(pid);
+    `);
+    this.insertStmt = this.db.prepare(
+      `INSERT INTO samples (ts, provider, pid, refined_status, turn_count, tool_count, last_write_age)
+       VALUES (@ts, @provider, @pid, @refinedStatus, @turnCount, @toolCount, @lastWriteAge)`
+    );
+    this.countStmt = this.db.prepare(`SELECT COUNT(*) AS n FROM samples`);
+    this.pruneStmt = this.db.prepare(
+      `DELETE FROM samples WHERE id IN (
+         SELECT id FROM samples ORDER BY id ASC LIMIT @batch
+       )`
+    );
+    this.latestPerPidStmt = this.db.prepare(`
+      SELECT s.ts, s.provider, s.pid, s.refined_status AS refinedStatus,
+             s.turn_count AS turnCount, s.tool_count AS toolCount,
+             s.last_write_age AS lastWriteAge
+      FROM samples s
+      INNER JOIN (
+        SELECT pid, MAX(ts) AS max_ts FROM samples GROUP BY pid
+      ) latest ON s.pid = latest.pid AND s.ts = latest.max_ts
+    `);
+  }
+  /** Insert one sample. Returns the new row's id. */
+  write(sample) {
+    if (this.closed) throw new Error("TimeseriesStore is closed");
+    const res = this.insertStmt.run(sample);
+    return Number(res.lastInsertRowid);
+  }
+  /** Bulk insert in a single transaction (cheaper than N writes). */
+  writeMany(samples) {
+    if (this.closed) throw new Error("TimeseriesStore is closed");
+    if (samples.length === 0) return;
+    const tx = this.db.transaction((rows) => {
+      for (const r of rows) this.insertStmt.run(r);
+    });
+    tx(samples);
+  }
+  /** Current row count. */
+  rowCount() {
+    const row = this.countStmt.get();
+    return row.n;
+  }
+  /**
+   * Prune oldest rows until row count is <= maxRows. Returns how many
+   * rows were deleted. No-op when under cap.
+   *
+   * Batched delete: each iteration removes at most PRUNE_BATCH rows OR
+   * however many are over the cap (whichever is smaller). The cap-aware
+   * limit keeps prune deterministic when the overflow is small (a 25-row
+   * table with maxRows=10 must end at exactly 10 rows, not 0).
+   */
+  prune() {
+    if (this.closed) return 0;
+    let total = 0;
+    while (true) {
+      const count = this.rowCount();
+      if (count <= this.maxRows) break;
+      const over = count - this.maxRows;
+      const batch = Math.min(PRUNE_BATCH, over);
+      const res = this.pruneStmt.run({ batch });
+      total += Number(res.changes);
+      if (res.changes === 0) break;
+    }
+    return total;
+  }
+  /**
+   * Latest sample per pid. Used by the Prometheus exporter to build
+   * `_total{provider, status}` gauges without scanning every row.
+   */
+  latestPerPid() {
+    return this.latestPerPidStmt.all();
+  }
+  /** Idempotent close. */
+  close() {
+    if (this.closed) return;
+    this.closed = true;
+    this.db.close();
+  }
+  /** Test/debug helper. Do not use in production code. */
+  _all() {
+    return this.db.prepare(
+      `SELECT ts, provider, pid, refined_status AS refinedStatus,
+                turn_count AS turnCount, tool_count AS toolCount,
+                last_write_age AS lastWriteAge
+         FROM samples ORDER BY id ASC`
+    ).all();
+  }
+};
+
+// src/timeseries/prometheus.ts
+var PROMETHEUS_CONTENT_TYPE = "text/plain; version=0.0.4; charset=utf-8";
+var STATUSES = [
+  "awaiting_user_input",
+  "tool_pending",
+  "crashed",
+  "working",
+  "idle"
+];
+function escapeLabel(v) {
+  return v.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n");
+}
+function aggregateSessions(samples) {
+  const out = /* @__PURE__ */ new Map();
+  for (const s of samples) {
+    let perProvider = out.get(s.provider);
+    if (!perProvider) {
+      perProvider = /* @__PURE__ */ new Map();
+      out.set(s.provider, perProvider);
+    }
+    perProvider.set(s.refinedStatus, (perProvider.get(s.refinedStatus) ?? 0) + 1);
+  }
+  return out;
+}
+function renderPrometheus(input) {
+  const lines = [];
+  lines.push("# HELP agent_conductor_build_info Build metadata for the running agent-conductor.");
+  lines.push("# TYPE agent_conductor_build_info gauge");
+  lines.push(`agent_conductor_build_info{version="${escapeLabel(input.version)}"} 1`);
+  if (input.store) {
+    lines.push("# HELP agent_conductor_sessions_total Current count of sessions in each refinedStatus.");
+    lines.push("# TYPE agent_conductor_sessions_total gauge");
+    const samples = input.store.latestPerPid();
+    const matrix = aggregateSessions(samples);
+    if (matrix.size === 0) {
+      lines.push(`agent_conductor_sessions_total{provider="none",status="idle"} 0`);
+    } else {
+      const providers = Array.from(matrix.keys()).sort();
+      for (const provider of providers) {
+        const perStatus = matrix.get(provider);
+        for (const status of STATUSES) {
+          const count = perStatus.get(status) ?? 0;
+          lines.push(
+            `agent_conductor_sessions_total{provider="${escapeLabel(provider)}",status="${status}"} ${count}`
+          );
+        }
+      }
+    }
+  }
+  if (input.samplesWritten !== void 0) {
+    lines.push("# HELP agent_conductor_samples_total Cumulative sample rows written to the timeseries store since boot.");
+    lines.push("# TYPE agent_conductor_samples_total counter");
+    lines.push(`agent_conductor_samples_total ${input.samplesWritten}`);
+  }
+  if (input.auditBytes !== null && input.auditBytes !== void 0) {
+    lines.push("# HELP agent_conductor_audit_bytes_total Current size of the inject audit log file in bytes.");
+    lines.push("# TYPE agent_conductor_audit_bytes_total gauge");
+    lines.push(`agent_conductor_audit_bytes_total ${input.auditBytes}`);
+  }
+  if (input.todos) {
+    lines.push("# HELP agent_conductor_todos_total Current todo count by state (Apple Reminders intent layer).");
+    lines.push("# TYPE agent_conductor_todos_total gauge");
+    lines.push(`agent_conductor_todos_total{state="open"} ${input.todos.open}`);
+    lines.push(`agent_conductor_todos_total{state="completed"} ${input.todos.completed}`);
+  }
+  return lines.join("\n") + "\n";
+}
+
+// src/http/server.ts
 var DEFAULT_PORT = 32140;
 var PORT_SCAN_MAX = 32199;
 function serverVersion2() {
-  return "0.4.0";
+  return "0.5.0";
 }
 function sendJson(res, status, body) {
   const text = JSON.stringify(body);
@@ -2222,6 +2424,14 @@ function sendJson(res, status, body) {
     "Cache-Control": "no-store"
   });
   res.end(text);
+}
+function sendText(res, status, contentType, body) {
+  res.writeHead(status, {
+    "Content-Type": contentType,
+    "Content-Length": Buffer.byteLength(body).toString(),
+    "Cache-Control": "no-store"
+  });
+  res.end(body);
 }
 function isLoopbackHost(host) {
   if (!host) return false;
@@ -2305,7 +2515,7 @@ function handleHealth() {
   };
 }
 var STARTED_AT = Date.now();
-async function dispatchHttp(req) {
+async function dispatchHttp(req, ctx = {}) {
   if (req.method !== "GET" && req.method !== "HEAD") {
     return { status: 405, body: { error: "method_not_allowed", allowed: ["GET"] } };
   }
@@ -2333,19 +2543,46 @@ async function dispatchHttp(req) {
         return { status: 200, body: await handleSessions(query) };
       case "/audit":
         return { status: 200, body: await handleAudit(query) };
+      case "/metrics":
+        return {
+          status: 200,
+          contentType: PROMETHEUS_CONTENT_TYPE,
+          body: renderPrometheus({
+            version: serverVersion2(),
+            store: ctx.store,
+            samplesWritten: ctx.samplesWritten?.(),
+            auditBytes: await safeAuditBytes(),
+            todos: ctx.todos?.()
+          })
+        };
       default:
         return {
           status: 404,
           body: {
             error: "not_found",
             path,
-            routes: ["/health", "/snapshot", "/sessions", "/audit", "/events (WebSocket)"]
+            routes: [
+              "/health",
+              "/snapshot",
+              "/sessions",
+              "/audit",
+              "/metrics",
+              "/events (WebSocket)"
+            ]
           }
         };
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     return { status: 500, body: { error: "internal_error", message: msg } };
+  }
+}
+async function safeAuditBytes() {
+  try {
+    const st = await promises.stat(AUDIT_FILE_PATH);
+    return st.size;
+  } catch {
+    return null;
   }
 }
 function pickPort(start, max) {
@@ -2383,8 +2620,12 @@ async function startHttpServer(opts = {}) {
     inflight.add(res);
     res.once("close", () => inflight.delete(res));
     void (async () => {
-      const { status, body } = await dispatchHttp(req);
-      sendJson(res, status, body);
+      const result = await dispatchHttp(req, opts.ctx ?? {});
+      if (result.contentType) {
+        sendText(res, result.status, result.contentType, String(result.body));
+      } else {
+        sendJson(res, result.status, result.body);
+      }
     })();
   });
   await new Promise((resolve, reject) => {
@@ -2447,25 +2688,29 @@ var WsBroadcaster = class {
   }
 };
 function serverVersion3() {
-  return "0.4.0";
+  return "0.5.0";
 }
-function startSessionsDiffPoller(broadcaster, intervalMs = DEFAULT_SESSIONS_POLL_MS) {
+function startSessionsDiffPoller(broadcaster, intervalMs = DEFAULT_SESSIONS_POLL_MS, pollerOpts = {}) {
   let stopped = false;
   let prev = /* @__PURE__ */ new Map();
   const tick = async () => {
     if (stopped) return;
     try {
-      const merged = await Promise.all(
+      const byProvider = await Promise.all(
         allProviders().map(async (p) => {
           try {
-            return await p.discover();
+            return { provider: p.name, sessions: await p.discover() };
           } catch {
-            return [];
+            return { provider: p.name, sessions: [] };
           }
         })
       );
-      const sessions = merged.flat();
+      const sessions = byProvider.flatMap((b) => b.sessions);
+      const providerByPid = /* @__PURE__ */ new Map();
+      for (const b of byProvider) for (const s of b.sessions) providerByPid.set(s.pid, b.provider);
       const next = await refinedStatusFor(sessions);
+      const now = Date.now();
+      const samples = [];
       for (const [pid, status] of next.entries()) {
         const previous = prev.get(pid) ?? null;
         if (previous !== status) {
@@ -2473,6 +2718,25 @@ function startSessionsDiffPoller(broadcaster, intervalMs = DEFAULT_SESSIONS_POLL
             type: "sessions:update",
             payload: { pid, refinedStatus: status, previous }
           });
+        }
+        if (pollerOpts.store) {
+          samples.push({
+            ts: now,
+            provider: providerByPid.get(pid) ?? "unknown",
+            pid,
+            refinedStatus: status,
+            turnCount: null,
+            toolCount: null,
+            lastWriteAge: null
+          });
+        }
+      }
+      if (pollerOpts.store && samples.length > 0) {
+        try {
+          pollerOpts.store.writeMany(samples);
+          for (let i = 0; i < samples.length; i += 1) pollerOpts.onSampleWritten?.();
+          pollerOpts.store.prune();
+        } catch {
         }
       }
       prev = next;
@@ -2511,7 +2775,8 @@ function attachWebSocket(http, opts = {}) {
     if (!stopSessions) {
       stopSessions = startSessionsDiffPoller(
         broadcaster,
-        opts.sessionsPollMs ?? DEFAULT_SESSIONS_POLL_MS
+        opts.sessionsPollMs ?? DEFAULT_SESSIONS_POLL_MS,
+        { store: opts.timeseriesStore, onSampleWritten: opts.onSampleWritten }
       );
     }
   };
@@ -2609,9 +2874,24 @@ function attachWebSocket(http, opts = {}) {
 }
 
 // src/http/index.ts
+function resolveTimeseries(opt) {
+  if (opt === true) return {};
+  if (opt && typeof opt === "object") return opt;
+  if (process.env.AGENT_CONDUCTOR_TIMESERIES === "1") return {};
+  return null;
+}
 async function startDaemon(opts = {}) {
-  const http = await startHttpServer(opts);
-  const ws = attachWebSocket(http.server, opts);
+  const storeOpts = resolveTimeseries(opts.timeseries);
+  const store = storeOpts ? new TimeseriesStore(storeOpts) : null;
+  let writtenCount = 0;
+  const samplesWritten = () => writtenCount;
+  const ctx = store ? { store, samplesWritten } : {};
+  const http = await startHttpServer({ ...opts, ctx });
+  const ws = attachWebSocket(http.server, {
+    ...opts,
+    timeseriesStore: store ?? void 0,
+    onSampleWritten: store ? () => writtenCount += 1 : void 0
+  });
   let closed = false;
   let cachedReport = null;
   const close = async (timeoutMs = DEFAULT_DRAIN_MS) => {
@@ -2620,7 +2900,8 @@ async function startDaemon(opts = {}) {
         httpDrained: true,
         inflightAtStart: 0,
         wsClientsClosed: 0,
-        elapsedMs: 0
+        elapsedMs: 0,
+        samplesWritten: writtenCount
       };
     }
     closed = true;
@@ -2629,16 +2910,23 @@ async function startDaemon(opts = {}) {
     const half = Math.max(100, Math.floor(timeoutMs / 2));
     await ws.close(half);
     const httpReport = await http.gracefulClose(half);
+    if (store) {
+      try {
+        store.close();
+      } catch {
+      }
+    }
     const report = {
       httpDrained: httpReport.drained,
       inflightAtStart: httpReport.inflightAtStart,
       wsClientsClosed: wsClientsAtStart,
-      elapsedMs: Date.now() - t0
+      elapsedMs: Date.now() - t0,
+      samplesWritten: writtenCount
     };
     cachedReport = report;
     return report;
   };
-  return { port: http.port, url: http.url, http, ws, close };
+  return { port: http.port, url: http.url, http, ws, store, samplesWritten, close };
 }
 
 // src/cli/commands/serve.ts
@@ -2651,11 +2939,17 @@ Routes:
   GET  /snapshot      OrchestratorSnapshot (?provider=claude-code|aider|cursor-cli|all)
   GET  /sessions      Discovery only (cheaper)
   GET  /audit         Audit log tail (?tail=20)
+  GET  /metrics       Prometheus exposition (text/plain; version=0.0.4)
   WS   /events        Live event stream \u2014 hello + todo:* + sessions:update
 
 Flags:
   --port N            Bind to a specific port (fails if in use).
                       Default: pick the first free port from 32140 upward.
+  --timeseries        Enable the SQLite samples store at
+                      $AGENT_CONDUCTOR_STATE_DIR/timeseries.db (default
+                      ~/.local/share/agent-conductor/). Also enables
+                      meaningful agent_conductor_sessions_total gauges
+                      in /metrics. Same as AGENT_CONDUCTOR_TIMESERIES=1.
   -h, --help          Show this help
 
 Security:
@@ -2682,13 +2976,18 @@ async function serveCmd(args) {
     return 0;
   }
   const port = flagInt(args, "port");
-  const daemon = await startDaemon({ port });
+  const timeseries = flagBool(args, "timeseries");
+  const daemon = await startDaemon({ port, timeseries });
   process.stdout.write(`agent-conductor: HTTP ${daemon.url}
 `);
   process.stdout.write(`agent-conductor: WS   ws://127.0.0.1:${daemon.port}/events
 `);
   process.stdout.write(`agent-conductor: PID  ${process.pid}
 `);
+  if (daemon.store) {
+    process.stdout.write(`agent-conductor: TS   ${daemon.store.path} (maxRows=${daemon.store.maxRows})
+`);
+  }
   process.stdout.write(`agent-conductor: ready (Ctrl+C to stop)
 `);
   const exitOn = (signal) => {
@@ -2700,7 +2999,7 @@ agent-conductor: ${signal} received \u2014 draining...
         const report = await daemon.close();
         const status = report.httpDrained ? "clean" : "timed out (forced)";
         process.stdout.write(
-          `agent-conductor: closed ${status} in ${report.elapsedMs}ms (http inflight ${report.inflightAtStart}\u21920, ws clients ${report.wsClientsClosed})
+          `agent-conductor: closed ${status} in ${report.elapsedMs}ms (http inflight ${report.inflightAtStart}\u21920, ws clients ${report.wsClientsClosed}${report.samplesWritten > 0 ? `, ${report.samplesWritten} samples written` : ""})
 `
         );
       } catch (err) {
@@ -2761,7 +3060,7 @@ async function run(argv) {
     return 0;
   }
   if (flagBool(args, "v", "version")) {
-    const version = "0.4.0";
+    const version = "0.5.0";
     process.stdout.write(`agent-conductor v${version}
 `);
     return 0;

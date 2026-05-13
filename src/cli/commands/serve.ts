@@ -26,11 +26,17 @@ Routes:
   GET  /snapshot      OrchestratorSnapshot (?provider=claude-code|aider|cursor-cli|all)
   GET  /sessions      Discovery only (cheaper)
   GET  /audit         Audit log tail (?tail=20)
+  GET  /metrics       Prometheus exposition (text/plain; version=0.0.4)
   WS   /events        Live event stream — hello + todo:* + sessions:update
 
 Flags:
   --port N            Bind to a specific port (fails if in use).
                       Default: pick the first free port from 32140 upward.
+  --timeseries        Enable the SQLite samples store at
+                      $AGENT_CONDUCTOR_STATE_DIR/timeseries.db (default
+                      ~/.local/share/agent-conductor/). Also enables
+                      meaningful agent_conductor_sessions_total gauges
+                      in /metrics. Same as AGENT_CONDUCTOR_TIMESERIES=1.
   -h, --help          Show this help
 
 Security:
@@ -58,11 +64,15 @@ export async function serveCmd(args: ParsedArgs): Promise<number> {
     return 0;
   }
   const port = flagInt(args, "port");
+  const timeseries = flagBool(args, "timeseries");
 
-  const daemon = await startDaemon({ port });
+  const daemon = await startDaemon({ port, timeseries });
   process.stdout.write(`agent-conductor: HTTP ${daemon.url}\n`);
   process.stdout.write(`agent-conductor: WS   ws://127.0.0.1:${daemon.port}/events\n`);
   process.stdout.write(`agent-conductor: PID  ${process.pid}\n`);
+  if (daemon.store) {
+    process.stdout.write(`agent-conductor: TS   ${daemon.store.path} (maxRows=${daemon.store.maxRows})\n`);
+  }
   process.stdout.write(`agent-conductor: ready (Ctrl+C to stop)\n`);
 
   // Park the process. Signal handlers below trigger the graceful shutdown.
@@ -74,7 +84,8 @@ export async function serveCmd(args: ParsedArgs): Promise<number> {
         const status = report.httpDrained ? "clean" : "timed out (forced)";
         process.stdout.write(
           `agent-conductor: closed ${status} in ${report.elapsedMs}ms ` +
-            `(http inflight ${report.inflightAtStart}→0, ws clients ${report.wsClientsClosed})\n`,
+            `(http inflight ${report.inflightAtStart}→0, ws clients ${report.wsClientsClosed}` +
+            `${report.samplesWritten > 0 ? `, ${report.samplesWritten} samples written` : ""})\n`,
         );
       } catch (err) {
         process.stderr.write(

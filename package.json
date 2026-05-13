@@ -1,6 +1,6 @@
 {
   "name": "agent-conductor",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Pilot N concurrent AI coding agent CLI sessions from one place. JSONL transcript reader, deterministic status deriver, cwd-collision lock, tmux send-keys controller with audit log, macOS Reminders intent layer, and a `agent-conductor` CLI binary for terminal-driven workflows. Claude Code today, pluggable for Aider / Cursor CLI / others.",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -54,6 +54,11 @@
       "types": "./dist/http/index.d.ts",
       "import": "./dist/http/index.js",
       "require": "./dist/http/index.cjs"
+    },
+    "./timeseries": {
+      "types": "./dist/timeseries/index.d.ts",
+      "import": "./dist/timeseries/index.js",
+      "require": "./dist/timeseries/index.cjs"
     }
   },
   "files": [
@@ -95,6 +100,7 @@
     "node": ">=20"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.10.5",
     "@types/ws": "^8.18.1",
     "tsup": "^8.3.6",
@@ -110,6 +116,7 @@
   },
   "homepage": "https://github.com/zorahrel/agent-conductor#readme",
   "dependencies": {
+    "better-sqlite3": "^12.10.0",
     "ws": "^8.20.0"
   }
 }
